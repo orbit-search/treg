@@ -262,6 +262,32 @@
   {
     "kind": "APIRoute",
     "methods": [
+      "POST"
+    ],
+    "name": "submit_feedback",
+    "path": "/feedback"
+  },
+  {
+    "kind": "APIRoute",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "name": "get_feedback",
+    "path": "/feedback/{feedback_id}"
+  },
+  {
+    "kind": "APIRoute",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "name": "admin_feedback",
+    "path": "/admin/feedback"
+  },
+  {
+    "kind": "APIRoute",
+    "methods": [
       "GET",
       "HEAD"
     ],
@@ -565,6 +591,15 @@
       "GET",
       "HEAD"
     ],
+    "name": "feedback_md",
+    "path": "/feedback.md"
+  },
+  {
+    "kind": "APIRoute",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
     "name": "favicon",
     "path": "/favicon.ico"
   },
@@ -666,6 +701,24 @@
     ],
     "name": "fable_page",
     "path": "/fable"
+  },
+  {
+    "kind": "APIRoute",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "name": "astra_page",
+    "path": "/astra"
+  },
+  {
+    "kind": "APIRoute",
+    "methods": [
+      "GET",
+      "HEAD"
+    ],
+    "name": "gpt6_page",
+    "path": "/gpt6"
   },
   {
     "kind": "APIRoute",

@@ -46,6 +46,10 @@ suspended") or `org.suspended` ("org suspended"). Set by the admin endpoints bel
 endpoints are unaffected (they use `require_superadmin`).
 
 ## Endpoints (all under `/admin/*`, gated by `require_superadmin`)
+
+- **Feedback:** `GET /admin/feedback` (`routers.feedback.admin_feedback`) returns private reports,
+  filtered by optional category, with `limit` and descending-ID `before` pagination. It shares
+  `get_admin_session` with the super-admin gate. See [feedback](feedback.md).
 - **Reads:** `admin_stats` (totals, `tools_by_injector`/`tools_by_host`, `credential_health` rollup,
   call volume + success rate, `growth` counts — computed in-process over small result sets),
   `admin_orgs` (every org + member/role/tool/secret/bundle counts), `admin_org_detail`,

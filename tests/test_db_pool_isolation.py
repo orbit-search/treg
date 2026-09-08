@@ -14,6 +14,7 @@ classified here, so "nobody thought about which pool this belongs on" fails rath
 from __future__ import annotations
 
 import ast
+import functools
 import pathlib
 
 import pytest
@@ -33,6 +34,7 @@ EXPECTED_MAKERS: dict[str, set[str]] = {
     "api.py": {API}, "mcp.py": {API}, "routers/resources.py": {API},
     "application/auth.py": {API}, "application/billing.py": {API}, "application/connect.py": {API},
     "application/asynctasks.py": {API},
+    "application/feedback.py": {API},  # synchronous intake; admin reads use get_admin_session
     "application/referrals.py": {API}, "application/signup.py": {API},
     "application/onboard/__init__.py": {API},
     "application/call/authorize.py": {API}, "application/call/idempotency.py": {API},
@@ -68,6 +70,7 @@ def _maker_names(tree: ast.AST) -> set[str]:
     return names
 
 
+@functools.cache
 def _modules_opening_sessions() -> dict[str, ast.AST]:
     out = {}
     for path in sorted(SRC.rglob("*.py")):
@@ -116,7 +119,7 @@ def test_the_background_pool_fits_every_consumer_not_just_the_throttled_ones():
     from treg import archive, audit
 
     consumers = infra_db.BACKGROUND_CONSUMERS
-    assert consumers["audit._write"] == audit._MAX_CONCURRENT_WRITES
+    assert consumers["audit._flush"] == audit._MAX_CONCURRENT_WRITES
     assert consumers["archive._store/_touch"] == archive._MAX_CONCURRENT_WRITES
     assert infra_db.POOL_SPECS["background"]["pool_size"] >= sum(consumers.values())
 

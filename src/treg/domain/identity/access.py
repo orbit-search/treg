@@ -241,3 +241,44 @@ def _is_agent_email(email: str) -> bool:
 def _is_machine_email(email: str) -> bool:
     """An identity minted by an admin for a machine — never a person who can sign in."""
     return _is_agent_email(email) or _norm_email(email).endswith(f"@{PUBLIC_DEMO_DOMAIN}")
+
+
+# ---- the email-domain blocklist ------------------------------------------------------------------
+# Entirely configuration: `TREG_BLOCKED_EMAIL_DOMAINS` and nothing else. An unset variable blocks
+# nothing, which is the default. Two rules:
+#   - match the DOMAIN only, never the whole address. Matching the address false-flags real people
+#     whose USERNAME happens to contain a listed string.
+#   - walk parent domains, whole labels off the front only and never the bare last label, because
+#     registering `<random>.<listed-domain>` is otherwise a one-line bypass. The walk is safe
+#     because no entry can be a bare public suffix: `config._blocked_email_domains` drops dotless
+#     entries, so a typed `com` cannot refuse the world.
+# A PURE classifier: refusing, logging and skipping a perk are the caller's decisions
+# (`application.signup.blocked_email`).
+#
+# There is deliberately no list in the code. A blocklist is a speed bump — a new domain costs the
+# other side minutes — so its only value is being editable in the same minutes, which a deploy is
+# not. Substring rules on the domain were tried and removed: measured against a public
+# throwaway-domain corpus they matched 0.17% of it, added nothing over the exact entries, and
+# refused a real company whose domain merely contained one of the strings.
+
+
+def _email_domain(email: str) -> str:
+    """The lowercased domain part of an address, "" when there is none. The ONLY part of an address
+    the blocklist ever looks at."""
+    return _norm_email(email).rpartition("@")[2]
+
+
+def _is_blocked_email(email: str) -> bool:
+    """Pure classifier: is this address on a configured domain, or on a subdomain of one? An unset
+    `TREG_BLOCKED_EMAIL_DOMAINS` blocks nothing."""
+    blocked = get_settings().blocked_email_domain_set
+    if not blocked:
+        return False
+    domain = _email_domain(email)
+    if not domain:
+        return False
+    labels = domain.split(".")
+    for i in range(len(labels) - 1):  # every parent domain, never the bare last label
+        if ".".join(labels[i:]) in blocked:
+            return True
+    return False

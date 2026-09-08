@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import AsyncIterator
 from functools import cache
 from importlib import import_module
@@ -38,8 +39,9 @@ _is_sqlite = "sqlite" in _db_url
 # whole pool when this was 2 — see `_purge_expired_error_evidence`, now on `background` and
 # single-flighted so concurrent readers cannot multiply it.
 #
-# Sizes are PER INSTANCE and a rolling deploy runs two, so the SUM is what must stay under the
-# database plan's ~100 ceiling — see ops/deploy.md, and the guard test.
+# Sizes are PER PROCESS, the web service runs two uvicorn workers, and a rolling deploy runs two
+# instances, so `per_process × 2 × 2` is what must stay under the database plan's 103 ceiling —
+# see `connection_budget` below and ops/deploy.md.
 #
 # These numbers can only be validated in production: too small and real traffic gets 503s, too large
 # and the bulkhead is decorative, and no test can tell you which. `TREG_DB_POOL_OVERRIDES` makes a
@@ -48,8 +50,8 @@ _is_sqlite = "sqlite" in _db_url
 # Everything that can hold a `background` slot at the same moment. Keep this in step with reality:
 # it is what sizes the pool, and a consumer missing from it is a row silently dropped under load.
 BACKGROUND_CONSUMERS: dict[str, int] = {
-    "audit._write": 4,            # bounded by audit._MAX_CONCURRENT_WRITES
-    "archive._store/_touch": 4,   # bounded by archive._MAX_CONCURRENT_WRITES (one shared semaphore)
+    "audit._flush": 1,            # one batching writer per process (audit._MAX_CONCURRENT_WRITES)
+    "archive._store/_touch": 2,   # bounded by archive._MAX_CONCURRENT_WRITES (one shared semaphore)
     "adsconv.worker": 1,          # holds its slot across two Google round trips — see follow-ups
     "archive.prune_worker": 1,    # holds one across a whole sweep
     "archive.refresh_worker": 1,
@@ -100,6 +102,36 @@ if _overrides := get_settings().db_pool_overrides:
     POOL_SPECS = _apply_overrides(POOL_SPECS, _overrides)
 
 
+def connection_budget(workers: int | None = None) -> dict[str, int]:
+    """How many connections these specs can open, at the three scopes that matter.
+
+    Every number in `POOL_SPECS` is PER PROCESS, and the reference deployment runs TWO: Render sets
+    `WEB_CONCURRENCY=2` on the 2c-4g plan and uvicorn honors it (`Started server process` twice in
+    the boot log). A rolling deploy then runs two instances for a minute. So the ceiling the specs
+    must clear is `per_process × workers × 2` against Postgres's `max_connections` (103 on the
+    1c-2g plan) - the arithmetic that, taken per instance, let the 2026-09-04 defaults (31) open
+    124 connections at every deploy until the dashboard override cut them to 21 (84).
+    """
+    per_process = sum(spec["pool_size"] + spec["max_overflow"] for spec in POOL_SPECS.values())
+    if workers is None:
+        try:
+            workers = max(1, int(os.environ.get("WEB_CONCURRENCY", "1")))
+        except ValueError:
+            workers = 1
+    return {"per_process": per_process, "workers": workers,
+            "per_instance": per_process * workers, "deploy_peak": per_process * workers * 2}
+
+
+_budget = connection_budget()
+logging.getLogger("treg").info(
+    "db pools per process: api %d+%d, admin %d+%d, background %d+%d = %d; x%d workers = %d per "
+    "instance, %d at a rolling deploy (Postgres max_connections on the reference plan: 103)",
+    POOL_SPECS["api"]["pool_size"], POOL_SPECS["api"]["max_overflow"],
+    POOL_SPECS["admin"]["pool_size"], POOL_SPECS["admin"]["max_overflow"],
+    POOL_SPECS["background"]["pool_size"], POOL_SPECS["background"]["max_overflow"],
+    _budget["per_process"], _budget["workers"], _budget["per_instance"], _budget["deploy_peak"])
+
+
 def _new_engine(name: str):
     """One pooled engine per `POOL_SPECS` entry.
 
@@ -128,6 +160,37 @@ if _is_sqlite:
     _admin_engine = _background_engine = _engine
 
 _engines = (_engine, _admin_engine, _background_engine)
+_POOL_NAMES = ("api", "admin", "background")
+
+
+def pool_snapshot() -> dict[str, dict[str, int]]:
+    """What each pool holds RIGHT NOW: connections checked out, of how many it may hand out.
+
+    The sizing question `POOL_SPECS` answers by arithmetic ("13 is the sum of the semaphores") can
+    only be settled by measurement; this is the measurement. `checked_out` counts slots in use
+    (persistent and overflow alike), `capacity` is `pool_size + max_overflow`. SQLite has no pool
+    worth reading and reports nothing. A pure read of SQLAlchemy's counters - no lock, no I/O.
+    """
+    if _is_sqlite:
+        return {}
+    out: dict[str, dict[str, int]] = {}
+    for name, engine in zip(_POOL_NAMES, _engines):
+        pool = engine.sync_engine.pool
+        checked_out = getattr(pool, "checkedout", None)
+        if checked_out is None:
+            continue
+        spec = POOL_SPECS[name]
+        out[name] = {"checked_out": int(checked_out()),
+                     "capacity": spec["pool_size"] + spec["max_overflow"]}
+    return out
+
+
+def fold_pool_peaks(peaks: dict[str, int], snapshot: dict[str, dict[str, int]]) -> dict[str, int]:
+    """Keep the per-pool maximum of `checked_out` seen across samples (the gauge's whole job)."""
+    for name, row in snapshot.items():
+        if row["checked_out"] > peaks.get(name, 0):
+            peaks[name] = row["checked_out"]
+    return peaks
 
 # The API pool: every request handler, through `get_session` or directly.
 session_maker = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)

@@ -216,6 +216,56 @@ async def test_routed_plan_keeps_per_success_hit_fallback_from_the_cache(
 
 # ---- the call path ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("routed", [False, True])
+@pytest.mark.parametrize("verdict", ["valid", "invalid"])
+async def test_tomba_verification_keeps_email_in_query_and_settles(
+    clients: AsyncClient, enrichment_on, monkeypatch, routed, verdict,
+):
+    email = "person+tag@example.com"
+    payload = {"data": {"email": {"status": verdict, "score": 99}}}
+    seen = []
+
+    async def relay(request, upstream_url, tool, secrets, client, drop_params=None, **kwargs):
+        seen.append(upstream_url)
+        assert upstream_url == "https://api.tomba.io/v1/email-verifier"
+        assert request.method == "GET"
+        assert dict(request.query_items) == {"email": email}
+        assert "email" not in (drop_params or ())
+
+        async def body():
+            yield json.dumps(payload).encode()
+
+        async def close():
+            pass
+
+        return UpstreamResponse(200, ((b"content-type", b"application/json"),), body(), close)
+
+    monkeypatch.setattr(call_service, "relay", relay)
+    before = await _balance(clients)
+    if routed:
+        response = await clients.post(
+            "/call/treg.people.email.verify", json={"email": email},
+            headers={"X-Treg-Route-Prefer": "tomba"},
+        )
+    else:
+        response = await clients.get("/call/tomba.people.email.verify", params={"email": email})
+
+    assert response.status_code == 200, response.text
+    assert len(seen) == 1
+    if routed:
+        doc = response.json()
+        assert doc["raw"] == payload
+        assert doc["output"] == {"valid": verdict == "valid", "status": verdict, "score": 99}
+        assert doc["_treg"]["served_by"] == "tomba.people.email.verify"
+        assert doc["_treg"]["outcome"] == "hit", "an invalid verdict is still a verification answer"
+    else:
+        assert response.json() == payload
+    assert int(response.headers["X-Treg-Cost-Micro"]) == 8_900
+    assert before - await _balance(clients) == 8_900
+    async with session_maker() as db:
+        assert (await db.execute(select(Hold))).scalars().all() == []
+
+
 async def test_routed_call_runs_the_cheapest_child_and_returns_output_raw_and_provenance(clients: AsyncClient, enrichment_on, monkeypatch):
     seen = []
     monkeypatch.setattr(call_service, "relay", _relay_by_provider(
@@ -228,6 +278,7 @@ async def test_routed_call_runs_the_cheapest_child_and_returns_output_raw_and_pr
     assert d["output"] == {"email": "patrick@stripe.com", "confidence": 0.99, "first_name": "Patrick", "last_name": "Collison", "verified": True}
     assert d["raw"]["data"]["score"] == 99, "the winning provider's body, verbatim"
     assert d["_treg"]["served_by"] == "tomba.people.email.find" and d["_treg"]["outcome"] == "hit"
+    assert "advice" not in d["_treg"], "the provider vouched for the mailbox — nothing to add"
     assert r.headers["X-Treg-Served-By"] == "tomba.people.email.find" and r.headers["X-Treg-Providers-Tried"] == "tomba"
     assert seen == [("tomba", "GET", {"domain": "stripe.com", "full_name": "Patrick Collison"}, None)]
     charged = int(r.headers["X-Treg-Cost-Micro"])
@@ -241,6 +292,44 @@ async def test_routed_call_runs_the_cheapest_child_and_returns_output_raw_and_pr
     rows = (await clients.get("/calls")).json()
     kinds = {(x["tool_name"], x.get("credential_tier")) for x in rows}
     assert (ROUTED, "routed") in kinds and ("tomba.people.email.find", "platform") in kinds
+
+
+async def test_an_unverified_hit_carries_verify_advice(clients: AsyncClient, enrichment_on, monkeypatch):
+    """A found address the provider did not vouch for (Tomba's verification status is not `valid`
+    — the catch-all shape that bounced for a recruiting team on 2026-09-06) is still a HIT and
+    still billed, but the answer says so in `_treg.advice` and points at the verify endpoint. A
+    suggestion, not a chained call: the balance moves by the find alone."""
+    monkeypatch.setattr(call_service, "relay", _relay_by_provider(
+        {"tomba": [(200, {"data": {"email": "alan@pruittstructures.com", "score": 96,
+                                    "verification": {"status": "accept_all"}}})]}, []))
+    before = await _balance(clients)
+    r = await clients.post(f"/call/{ROUTED}", json={"full_name": "Alan Marquez", "domain": "pruittstructures.com"})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["output"]["email"] == "alan@pruittstructures.com" and d["output"]["verified"] is False
+    assert d["_treg"]["outcome"] == "hit"
+    assert "treg.people.email.verify" in d["_treg"]["advice"]
+    assert before - await _balance(clients) == int(r.headers["X-Treg-Cost-Micro"]) == 8_900, "the find, nothing chained"
+
+
+async def test_a_people_search_hit_always_carries_verify_advice(clients: AsyncClient, enrichment_on, monkeypatch):
+    """Search rows are directory listings: a row's email is found, not confirmed deliverable. The
+    contract has no `verified` output, so the advice attaches to every hit — Hunter domain-search
+    rows with `verification: null` were 73 of one team's 79 bounces (2026-09-08). Still a
+    suggestion: one child call, the find's price, nothing chained."""
+    monkeypatch.setattr(call_service, "relay", _relay_by_provider(
+        {"hunter": [(200, {"data": {"emails": [{"value": "info@royalfarms.com", "type": "generic", "confidence": 10,
+                                                 "verification": {"date": None, "status": None}}]},
+                            "meta": {"results": 1}})],
+         "*": [(200, {"persons": []})] * 12}, []))
+    before = await _balance(clients)
+    r = await clients.post("/call/treg.people.search", json={"company_domain": "royalfarms.com", "limit": 10})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["_treg"]["served_by"] == "hunter.companies.emails" and d["_treg"]["outcome"] == "hit"
+    assert d["output"]["people"][0]["verification"]["status"] is None, "the row's own field, untouched"
+    assert "treg.people.email.verify" in d["_treg"]["advice"] and "directory" in d["_treg"]["advice"]
+    assert before - await _balance(clients) == int(r.headers["X-Treg-Cost-Micro"]), "the find, nothing chained"
 
 
 async def test_error_on_the_first_child_falls_back_to_the_second(clients: AsyncClient, enrichment_on, monkeypatch):
@@ -603,7 +692,8 @@ def test_filters_reach_adapters_through_in_expr_and_array_bodies():
     q, b = cat.adapters["serpapi.google.keywords.ideas"].to_upstream(req)
     assert q == {"q": "coffee", "gl": "gb", "hl": "en", "engine": "google_autocomplete"}
     q, b = cat.adapters["tomba.people.email.verify"].to_upstream({"email": "a@b.io"})
-    assert q == {"email": "a@b.io"}, "a pathParams target travels as a query value the proxy folds into the path"
+    assert q == {"email": "a@b.io"}, "Tomba verification requires the email query parameter"
+    assert cat.by_id["tomba.people.email.verify"]["path"] == "/v1/email-verifier"
     assert cost_at({"usd": 0.00179, "type": "per_result", "per": 1}, req) == 8_950, "priced at the requested limit"
     ep = cat.by_id["treg.google.keywords.ideas"]
     assert ep["input"]["body"]["country"]["note"].startswith("filter — default 'us'")
@@ -1122,3 +1212,106 @@ async def test_strict_filters_refuses_a_looser_answer_instead_of_billing_it(clie
     assert r.status_code == 200 and r.json()["_treg"]["served_by"] == "aviato.people.search.simple", r.text
     assert "X-Treg-Ignored-Filters" not in r.headers and seen[0][2]["country"] == "Guatemala"
     get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("result,valid,miss", [
+    ("ok", True, False), ("invalid", False, False), ("disposable", False, False),
+    ("catch_all", False, False), ("unknown", False, False), ("unverified", False, False),
+])
+def test_millionverifier_verdicts(result, valid, miss):
+    cat = catalog_store.load()
+    eid = "millionverifier.people.email.verify"
+    assert eid in cat.by_id["treg.people.email.verify"]["routed_children"]
+    assert cat.platform_eligible(cat.by_id[eid])
+    assert not cat.platform_eligible(cat.by_id["millionverifier.account.usage"])
+    adapter = cat.adapters[eid]
+    assert adapter.verified
+    doc = {"result": result, "quality": "good" if valid else "bad", "error": ""}
+    assert adapter.from_upstream(doc) == {"valid": valid, "status": result}
+    assert adapter.is_miss(doc) is miss
+    assert adapter.is_miss({"result": "error", "error": "invalid_api_key"})
+    assert adapter.is_miss({})
+
+
+async def test_millionverifier_error_falls_through_unbilled(clients, enrichment_on, monkeypatch):
+    monkeypatch.setenv("TREG_PLATFORM_KEY_MILLIONVERIFIER", "PLATFORM-MV-KEY")
+    monkeypatch.setenv("TREG_PLATFORM_PROVIDERS", "millionverifier,leadmagic")
+    get_settings.cache_clear()
+    seen = []
+    monkeypatch.setattr(call_service, "relay", _relay_by_provider({
+        "millionverifier": [(200, {"result": "error", "error": "Apikey not found"})],
+        "leadmagic": [(200, {"email_status": "valid", "credits_consumed": 0.25})],
+    }, seen))
+    response = await clients.post("/call/treg.people.email.verify", json={"email": "support@millionverifier.com"},
+                                  headers={"X-Treg-Route-Prefer": "millionverifier,leadmagic"})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["_treg"]["served_by"] == "leadmagic.people.email.verify"
+    assert data["_treg"]["tried"][0]["outcome"] == "miss"
+    await audit.drain()
+    async with session_maker() as db:
+        rows = (await db.execute(select(CallRecord).where(
+            CallRecord.provider == "millionverifier"))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].cost_observed_micro == 0
+
+
+async def test_millionverifier_own_key_precedes_platform_and_is_free(clients, enrichment_on, monkeypatch):
+    monkeypatch.setenv("TREG_PLATFORM_KEY_MILLIONVERIFIER", "PLATFORM-MV-KEY")
+    monkeypatch.setenv("TREG_PLATFORM_PROVIDERS", "millionverifier,leadmagic")
+    get_settings.cache_clear()
+    await clients.post("/secrets", json={"name": "millionverifier", "value": "OWN-MV-KEY"})
+    before = await _balance(clients)
+    seen = []
+    monkeypatch.setattr(call_service, "relay", _relay_by_provider({
+        "millionverifier": [(200, {"result": "ok", "quality": "good", "error": ""})],
+    }, seen))
+    response = await clients.post("/call/treg.people.email.verify", json={"email": "support@millionverifier.com"})
+    assert response.status_code == 200, response.text
+    assert response.json()["_treg"]["served_by"] == "millionverifier.people.email.verify"
+    assert response.json()["_treg"]["tier"] == "credential"
+    assert await _balance(clients) == before
+
+
+async def test_millionverifier_account_usage_requires_own_key(clients, enrichment_on, monkeypatch):
+    monkeypatch.setenv("TREG_PLATFORM_KEY_MILLIONVERIFIER", "PLATFORM-MV-KEY")
+    monkeypatch.setenv("TREG_PLATFORM_PROVIDERS", "millionverifier")
+    get_settings.cache_clear()
+    seen = []
+    monkeypatch.setattr(call_service, "relay", _relay_by_provider({
+        "millionverifier": [(200, {"credits": 123})],
+    }, seen))
+    before = await _balance(clients)
+    response = await clients.get("/call/millionverifier.account.usage")
+    assert response.status_code == 404, response.text
+    assert seen == []
+    assert await _balance(clients) == before
+
+    await clients.post("/secrets", json={"name": "millionverifier", "value": "OWN-MV-KEY"})
+    response = await clients.get("/call/millionverifier.account.usage")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"credits": 123}
+    assert len(seen) == 1
+    assert await _balance(clients) == before
+
+
+@pytest.mark.parametrize("result,free,charged", [
+    ("ok", False, True), ("ok", True, True), ("invalid", False, True),
+    ("disposable", False, True), ("catch_all", False, False), ("unknown", False, False),
+])
+async def test_millionverifier_platform_billing(clients, enrichment_on, monkeypatch, result, free, charged):
+    """Definitive verdicts cost one credit; risky returns are free, unrelated to free-email flags."""
+    monkeypatch.setenv("TREG_PLATFORM_KEY_MILLIONVERIFIER", "PLATFORM-MV-KEY")
+    monkeypatch.setenv("TREG_PLATFORM_PROVIDERS", "millionverifier")
+    get_settings.cache_clear()
+    seen = []
+    monkeypatch.setattr(call_service, "relay", _relay_by_provider({
+        "millionverifier": [(200, {"result": result, "quality": "risky" if not charged else "good",
+                                   "error": "", "free": free, "credits": 497})],
+    }, seen))
+    before = await _balance(clients)
+    response = await clients.get("/call/millionverifier.people.email.verify", params={"email": "support@millionverifier.com"})
+    assert response.status_code == 200, response.text
+    delta = before - await _balance(clients)
+    assert delta == (1780 if charged else 0)
+    assert response.json()["result"] == result

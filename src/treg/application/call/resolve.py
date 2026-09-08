@@ -324,11 +324,20 @@ class MarketplaceCall:
     probe_lock_id: str | None = None
 
     @property
+    def free_owned_poll(self) -> bool:
+        """A free status read authorized against this org's durable submission."""
+        return (self.tier == "platform" and self.async_owner_call_id is not None
+                and self.cost_type == "free" and self.estimate_micro == 0
+                and not self.billed_oauth)
+
+    @property
     def metered(self) -> bool:
         """True when OUR money is at stake: treg's platform key (tier 4), or an org credential that
         rides treg's pay-per-use OAuth app (`billed_oauth`). Tiers 1/2 on a provider that bills the
-        account owner stay unmetered — there the org's own account pays."""
-        return self.tier in ("platform", "platform-overflow") or self.billed_oauth
+        account owner stay unmetered; there the org's own account pays. An owned free poll reads
+        an existing task without reserving or settling money again."""
+        return ((self.tier in ("platform", "platform-overflow") or self.billed_oauth)
+                and not self.free_owned_poll)
 
 
 # A `per_result` price is per ROW, so an estimate needs a row count. The caller's own limit param is
@@ -339,6 +348,55 @@ _PLATFORM_PAGE_MAX = 100
 _LIMIT_PARAMS = ("limit", "count", "depth", "page_size", "per_page", "num", "max_results", "size",
                  "pageSize", "perPage", "numResults", "maxResults",
                  "contactsLimit")  # camelCase: companyenrich, exa, lusha; contactsLimit: lusha decision-makers
+
+
+# Units that name an INPUT entity rather than a returned row: the caller pays per thing they asked
+# about (an SE Ranking `target`, a Serpstat `domain`, a `keyword`; `call` is the flat case). Providers
+# billing this way rarely report a per-call cost, so the reserve IS the charge — a wrong count is a
+# wrong bill, not a hold the settle trues up.
+_ENTITY_UNITS = frozenset({"target", "domain", "keyword", "call"})
+_ENTITY_KEYS = ("targets", "keywords", "domains", "urls", "target", "keyword", "domain", "url")
+_ENTITY_MAX = 10_000  # a body cannot reserve more than this many entities' worth in one call
+
+
+def _doc_entities(doc) -> int:
+    """Entities named by one JSON object: a list under an entity key (top level, or inside a
+    JSON-RPC `params` — serpstat), else one for a scalar target."""
+    if not isinstance(doc, dict):
+        return 0
+    for scope in (doc, doc.get("params")):
+        if not isinstance(scope, dict):
+            continue
+        for key in _ENTITY_KEYS:
+            val = scope.get(key)
+            if isinstance(val, list):
+                return len(val)
+            if isinstance(val, str) and val.strip():
+                return 1
+    return 0
+
+
+def _entity_count(query, body: bytes) -> int:
+    """How many billable input entities a request names. Query first (repeated keys — `target=a&
+    target=b` or `targets[]=` — and comma-separated values both count), then the JSON body (an
+    entity array, or one per task object in a DataForSEO-style array). Never below one: a request
+    that names no entity still asks about the one its path implies."""
+    n = 0
+    if query is not None:
+        items = query.multi_items() if hasattr(query, "multi_items") else list(query.items())
+        for key, val in items:
+            if key.rstrip("[]") in _ENTITY_KEYS and val is not None and str(val).strip():
+                n += max(1, len([p for p in str(val).split(",") if p.strip()]))
+    if n == 0 and body:
+        try:
+            doc = json.loads(body)
+        except (ValueError, UnicodeDecodeError):
+            doc = None
+        if isinstance(doc, list):
+            n = sum(_doc_entities(d) for d in doc) or len(doc)
+        else:
+            n = _doc_entities(doc)
+    return max(1, min(n, _ENTITY_MAX))
 
 
 def _body_limit(body: bytes) -> int | None:
@@ -388,7 +446,12 @@ def _platform_estimate_micro(cost: dict, query, body: bytes = b"") -> int:
     if usd is None:
         return 0
     n = 1
-    if cost.get("type") in ("per_result", "quota_rows"):
+    if cost.get("type") in ("per_result", "quota_rows") and cost.get("unit") in _ENTITY_UNITS:
+        # Priced per INPUT entity, not per returned row: the page-size default below has no
+        # meaning here and billed one-target calls 20x (seranking summary, serpstat overview —
+        # 2026-09-05). The request names how many entities it asks about.
+        n = 1 if cost.get("unit") == "call" else _entity_count(query, body)
+    elif cost.get("type") in ("per_result", "quota_rows"):
         asked = None
         for name in _LIMIT_PARAMS:
             raw = query.get(name)
@@ -493,6 +556,13 @@ def _marketplace_pricing(
     estimate = _platform_estimate_micro(cost, query, body)
     unit = (_usd_to_micro(cost["usd"])
             if cost.get("type") in ("per_result", "quota_rows") and cost.get("usd") else 0)
+    if provider == "tomba" and endpoint_id == "tomba.companies.emails.list":
+        # Tomba bills requested page slots in blocks of ten, with a ten-slot default.
+        # A partial non-empty page still costs the full block; settlement frees empty pages.
+        raw = query.get("limit")
+        size = int(str(raw)) if raw is not None and str(raw).isdigit() else 10
+        credit = _usd_to_micro(float(cost.get("usd") or 0))
+        return max(1, (size + 9) // 10) * credit, credit
     if provider == "crustdata" and endpoint_id in (
         "crustdata.companies.enrich", "crustdata.people.enrich"
     ):
@@ -1035,6 +1105,7 @@ async def _enforce_capability_pin(ep: dict, caller: Caller, db: AsyncSession) ->
 
 async def _provider_tool_grant(
     service: str, methods: tuple[str, ...], caller: Caller, db: AsyncSession,
+    endpoint: dict | None = None,
 ) -> tuple[Tool, Secret, str] | None:
     """Resolve a named catalog endpoint by provider and grant identity, not only by host.
 
@@ -1050,7 +1121,7 @@ async def _provider_tool_grant(
     connection_names = {
         item.name: item.connection_name for item in (provider.authorization_methods if provider else ())
     }
-    matches: list[tuple[int, bool, int, Tool, Secret, str]] = []
+    matches: list[tuple[bool, int, bool, int, Tool, Secret, str]] = []
     denied = False
     for tool in tools:
         for binding in tool.bindings or []:
@@ -1068,7 +1139,18 @@ async def _provider_tool_grant(
                 continue
             priority = methods.index(method)
             exact = tool.name == connection_names.get(method, service)
-            matches.append((priority, not exact, -(secret.id or 0), tool, secret, method))
+            authorization = (
+                connection_authorization.method_spec(provider, method) if provider else None
+            )
+            required = (
+                connection_authorization.required_scopes(endpoint, authorization)
+                if endpoint else []
+            )
+            granted = set(secret.granted_scopes.split())
+            scope_gap = any(scope not in granted for scope in required)
+            matches.append(
+                (scope_gap, priority, not exact, -(secret.id or 0), tool, secret, method)
+            )
     if not matches:
         if denied:
             raise ResolutionFailed(
@@ -1076,16 +1158,18 @@ async def _provider_tool_grant(
                 detail=f"a {service} authorization exists, but you do not have access to its tool",
             )
         return None
-    matches.sort(key=lambda item: item[:3])
-    _, _, _, tool, secret, method = matches[0]
+    matches.sort(key=lambda item: item[:4])
+    _, _, _, _, tool, secret, method = matches[0]
     return tool, secret, method
 
 
 def _authorization_error(
     ep: dict, method: str, *, code: str, explanation: str, scopes: list[str], authorization=None,
 ) -> ResolutionFailed:
+    provider = oauth_providers.get(ep["provider"])
     capability = (
-        authorization.connect_capability if authorization else ep.get("authorization_capability")
+        connection_authorization.connect_capability(provider, ep, authorization)
+        if provider else str(ep.get("authorization_capability") or "")
     )
     command = f"treg connections connect --provider {ep['provider']}"
     if capability:
@@ -1100,7 +1184,7 @@ def _authorization_error(
         "message": explanation,
         "cli_command": command,
         "dashboard_action": {
-            "label": authorization.action_label if authorization else "Add account",
+            "label": connection_authorization.action_label(authorization, capability),
             "url": "/app#connections",
         },
     })
@@ -1172,7 +1256,7 @@ async def _resolve_marketplace_call(
     chosen_method = ""
     if methods:
         authorization = None
-        grant = await _provider_tool_grant(service, methods, caller, db)
+        grant = await _provider_tool_grant(service, methods, caller, db, endpoint=ep)
         if grant is not None:
             chosen_tool, chosen_secret, chosen_method = grant
         else:
@@ -1267,7 +1351,7 @@ async def _resolve_marketplace_call(
         if lock is not None and capacity_marks.probe_due(lock.key):
             probe_lock_id = lock.lock_id
         elif (get_settings().overflow_mode == "on" and not caller.org.platform_overflow_disabled
-                and overflow_routes_view.for_endpoint(ep["id"])):
+                and overflow_routes_view.for_endpoint(ep["id"], estimate_micro=info_est)):
             skip_direct = True
         else:
             raise _provider_capacity_unavailable(

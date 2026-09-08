@@ -180,7 +180,7 @@ async def test_v2_declares_exact_directory_contract():
     tools = {tool.name: tool for tool in await mcp.directory_mcp.list_tools()}
     assert list(tools) == [
         "catalog_search", "catalog_get", "catalog_call_read", "catalog_call_write", "balance",
-        "catalog_request",
+        "catalog_request", "feedback",
     ]
     expected_titles = {
         "catalog_search": "Search Treg Catalog",
@@ -189,6 +189,7 @@ async def test_v2_declares_exact_directory_contract():
         "catalog_call_write": "Call a Write Endpoint",
         "balance": "Check Treg Balance",
         "catalog_request": "Request a Catalog Capability",
+        "feedback": "Submit Feedback",
     }
     assert {name: tool.title for name, tool in tools.items()} == expected_titles
     assert {name: tool.annotations.title for name, tool in tools.items()} == expected_titles
@@ -288,6 +289,7 @@ async def test_v2_serializes_the_scanner_facing_contract(clients):
         "catalog_call_write": "Call a Write Endpoint",
         "balance": "Check Treg Balance",
         "catalog_request": "Request a Catalog Capability",
+        "feedback": "Submit Feedback",
     }
     assert set(tools) == set(expected_titles)
     assert {name: tool["annotations"]["title"] for name, tool in tools.items()} == expected_titles
@@ -375,7 +377,10 @@ async def test_team_and_directory_catalog_call_results_match_except_attribution(
         directory = await _call_tool(client, "catalog_call_read", args, token)
     await audit.drain()
 
-    assert team == directory
+    assert team["call_id"] != directory["call_id"]
+    assert {k: v for k, v in team.items() if k != "call_id"} == {
+        k: v for k, v in directory.items() if k != "call_id"
+    }
     assert team["status"] == 200
     assert team["body"]["auth"] == "Bearer PAIRED-KEY"
     assert team["body"]["headers"]["x-paired-test"] == "same"
@@ -615,3 +620,45 @@ def test_transport_factory_refuses_a_server_audience_mismatch():
         mcp.build_mcp_app(server=mcp.directory_mcp, resource_version="v1")
     with pytest.raises(ValueError, match="same public surface"):
         mcp.build_mcp_app(server=mcp.mcp, resource_version="v2")
+
+
+@pytest.mark.parametrize(('path', 'tool'), [('/mcp/', 'call'), ('/mcp/v2/', 'catalog_call_read')])
+@pytest.mark.parametrize('sampled', [False, True])
+async def test_feedback_hint_only_wraps_successful_sampled_calls(clients, monkeypatch, path, tool, sampled):
+    from treg import analytics, mcp_feedback
+    from treg.application.call import service as call_service
+    from test_marketplace_call import _fake_relay
+
+    monkeypatch.setenv('TREG_PLATFORM_KEY_TIKHUB', 'SYNTHETIC-PLATFORM-KEY')
+    monkeypatch.setenv('TREG_PLATFORM_PROVIDERS', 'tikhub')
+    get_settings.cache_clear()
+    monkeypatch.setattr(mcp_feedback, 'sampled', lambda _: sampled)
+    events = []
+    monkeypatch.setattr(analytics, 'capture', lambda *args, **kw: events.append((args, kw)))
+    body = b'{"data":{"items":[]}}'
+    monkeypatch.setattr(call_service, 'relay', _fake_relay(200, body))
+    token = clients.headers['X-Treg-Token']
+    args = {'endpoint_id': 'tikhub.tiktok.video.comments', 'params': {'aweme_id': '7'},
+            'idempotency_key': 'feedback-hint-test'}
+    try:
+        async with paired_mcp_session() as client:
+            first = await _call_tool(client, tool, args, token, path=path)
+            replay = await _call_tool(client, tool, args, token, path=path)
+            monkeypatch.setattr(call_service, 'relay', _fake_relay(503, b'{"error":"unavailable"}'))
+            failed = await _call_tool(client, tool, {**args, 'idempotency_key': 'failed'}, token, path=path)
+        assert first['status'] == 200
+        assert first['body'] == json.loads(body)
+        assert first.get('hint') == (mcp_feedback.HINT if sampled else None)
+        assert first['call_id']
+        assert replay['replayed'] is True
+        assert 'stored answer' in replay['hint']
+        assert replay['call_id'] == first['call_id']
+        assert failed['status'] == 503
+        assert failed.get('hint') != mcp_feedback.HINT
+        exposures = [a for a, _ in events if a[1] == 'mcp_feedback_hint_attached']
+        assert len(exposures) == int(sampled)
+        if sampled:
+            assert exposures[0][2]['call_id'] == first['call_id']
+            assert 'body' not in exposures[0][2]
+    finally:
+        get_settings.cache_clear()

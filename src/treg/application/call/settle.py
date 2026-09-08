@@ -39,11 +39,15 @@ _NOT_THE_CALLERS_FAULT = frozenset({401, 402, 403, 405, 407, 408, 429})
 
 
 def _platform_billable(status_code: int, cost_type: str) -> bool:
-    """Does a response with this status cost us money? (plan §2.2)
+    """MAY a response with this status cost us money? (plan §2.2) — the status gate only.
       2xx                        → yes, the provider served it.
       4xx                        → only under `per_call`, and only when the rejection is about the
-                                   CALLER'S INPUT (400/404/422 …): the provider charges for accepting
-                                   such a request, so it is on the caller. A credential/quota refusal
+                                   CALLER'S INPUT (400/404/422 …). Even then the hold settles only
+                                   when the provider REPORTS a charge for it (`_platform_settle`):
+                                   no vendor has been seen billing a schema rejection, and Fiber's
+                                   400 "body/identifier Required" + 404 "profile not found" billed
+                                   twenty $0.04 calls to one team (2026-09-06) for answers Fiber
+                                   gave away. A credential/quota refusal
                                    (`_NOT_THE_CALLERS_FAULT`) is on us and is never billed — a 405
                                    rejects the method OUR catalog selected, while a 429 on a
                                    SHARED-plan key is treg's own saturation. Billing either would
@@ -145,6 +149,9 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
 
       - exa: REPORTED in dollars, `costDollars.total` on every 2xx body (same contract as
         dataforseo's `cost`) — the only place the per-result and per-content riders exist.
+      - fiber-ai: REPORTED in credits, `chargeInfo.creditsCharged` on every envelope, honoured
+        for `method: charged-now` only (a poll repeats its job's charge). Error bodies carry no
+        `chargeInfo`, which is what keeps a 400/404 on a `per_call` profile fetch unbilled.
 
     Everyone else settles at the estimate. This is the same signal the catalog's `observed_cost`
     harvests, which is what lets phase 5's drift detector compare the two numbers directly."""
@@ -209,6 +216,14 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
         if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0:
             return int(cost * 1_000_000 + 0.5)
         return None
+    if provider == "millionverifier" and mk.endpoint_id == "millionverifier.people.email.verify":
+        # Risky results receive automatic credit returns for eligible accounts. Keep the verdict
+        # as a routed answer, but never bill the caller for unknown/catch-all. `free` is the email
+        # service type, NOT a charge flag; `credits` is a delayed account balance, NOT usage.
+        # Misuse-flagged upstream accounts may lose credit-return eligibility; treg absorbs that
+        # exception instead of charging callers for a result advertised as free.
+        if doc.get("result") in ("unknown", "catch_all"):
+            return 0
     if provider == "exa":
         # REPORTED in dollars: every Exa response carries `costDollars.total` — the search base,
         # the per-result rider beyond 10, deep-mode uplifts and each contents type summed (verified
@@ -231,6 +246,33 @@ def _observed_cost_micro(mk: MarketplaceCall, body: bytes, headers=None) -> int 
         rate = catalog_store.load().credit_rates.get("lusha")
         if isinstance(credits, (int, float)) and not isinstance(credits, bool) and credits >= 0 and rate:
             return int(credits * rate * 1_000_000 + 0.5)
+        return None
+    if provider == "fiber-ai":
+        # REPORTED: every Fiber envelope carries `chargeInfo.creditsCharged` (the catalog header
+        # calls it the source of truth after a call), including 0 on a free identity resolve.
+        # Honoured only for `method: charged-now`: a poll answer repeats the credits the async
+        # process it belongs to was charged ("charged-for-async-process" — "polling itself is
+        # free"), and settling the poll at that number would bill the job twice. An error body
+        # (400/404) carries no `chargeInfo` at all and settles as unreported.
+        info = doc.get("chargeInfo")
+        credits = info.get("creditsCharged") if isinstance(info, dict) else None
+        rate = catalog_store.load().credit_rates.get("fiber-ai")
+        if (isinstance(info, dict) and info.get("method") == "charged-now" and rate
+                and isinstance(credits, (int, float)) and not isinstance(credits, bool) and credits >= 0):
+            return int(credits * rate * 1_000_000 + 0.5)
+        return None
+    if provider == "tomba" and mk.endpoint_id == "tomba.companies.emails.list":
+        # Live billing evidence: a non-empty page costs ceil(pageSize / 10) credits,
+        # even when fewer emails are returned. The catalog supplies the frozen credit price.
+        data = doc.get("data")
+        emails = data.get("emails") if isinstance(data, dict) else None
+        if isinstance(emails, list):
+            if not emails:
+                return 0
+            meta = doc.get("meta")
+            size = meta.get("pageSize") if isinstance(meta, dict) else None
+            if type(size) is int and size > 0 and mk.unit_micro > 0:
+                return ((size + 9) // 10) * mk.unit_micro
         return None
     if provider == "hunter" and mk.endpoint_id == "hunter.companies.emails":
         # DERIVED, like apollo. Hunter's domain search does not bill per row at all: it takes ONE
@@ -414,6 +456,14 @@ async def _platform_settle(
     # not billable to the caller because the aggregator's prepaid account still incurred the cost.
     observed = ((observed_override if observed_override is not None
                  else _observed_cost_micro(mk, body, headers)) if billable else None)
+    if billable and status_code >= 400 and not observed:
+        # A rejected request is billed on the provider's word, never on the estimate. The estimate
+        # prices a SERVED call; a 4xx served nothing, and a `per_call` rate card does not say the
+        # vendor takes a credit for a request it bounced at validation. When the body carries the
+        # vendor's own charge (`credits_charged`, `chargeInfo.creditsCharged`, `cost`…) and it is
+        # non-zero, the caller pays exactly that; when the vendor is silent or says 0, the hold is
+        # released — the same "when unclear, don't charge" rule `_NOT_THE_CALLERS_FAULT` follows.
+        billable, observed, reason = False, None, f"rejected_unbilled_{status_code}"
     # A provider-reported zero (an adapter miss, a failed `expect` envelope, an explicit zero
     # charge) is a fact about THIS answer and outranks any frozen basis: a price table says what a
     # success costs, and this was not one.

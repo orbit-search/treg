@@ -109,8 +109,8 @@ async def mcp_session(client: AsyncClient):
         _mcp.clear_endpoint_observation_reader(reader)
 
 
-async def test_the_server_lists_exactly_the_six_tools(clients):
-    """Six tools, not 2,600. The catalog is DATA reached through a tool, never a tool per endpoint —
+async def test_the_server_lists_the_shared_tools(clients):
+    """The catalog is data reached through a tool, never a tool per endpoint -
     2,600 schemas would bury the model's context and make the catalog unusable."""
     token = (await clients.post("/users", json={"email": "lister@superdesign.dev"})).json()["token"]
     async with mcp_session(clients) as c:
@@ -118,7 +118,7 @@ async def test_the_server_lists_exactly_the_six_tools(clients):
                                      "clientInfo": {"name": "t", "version": "1"}}, token)
         r = await _rpc(c, "tools/list", token=token)
         names = {t["name"] for t in r.json()["result"]["tools"]}
-    assert names == {"catalog_search", "catalog_get", "call", "balance", "my_tools", "catalog_request"}
+    assert names == {"catalog_search", "catalog_get", "call", "balance", "my_tools", "catalog_request", "feedback"}
 
 
 async def test_catalog_search_returns_priced_results(clients):
@@ -350,7 +350,7 @@ async def test_every_tool_declares_what_it_can_do(clients):
 
     ann = {t.name: t.annotations for t in await server.list_tools()}
     assert set(ann) == {"catalog_search", "catalog_get", "call", "balance", "my_tools",
-                        "catalog_request"}
+                        "catalog_request", "feedback"}
     assert all(a.title is None for a in ann.values())
     for name in ("catalog_search", "catalog_get", "balance", "my_tools"):
         a = ann[name]

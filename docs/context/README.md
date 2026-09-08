@@ -19,14 +19,15 @@ covers (frontmatter `sources:`). Regenerate this index with
 | [Google Ads conversion tracking — capture, outbox, upload](architecture/ads-conversions.md) | shipped | adsconv.py, signup.py, adtrack.js, gtag.js |
 | [Archive - every platform answer, kept and versioned (cache = the newest layer)](architecture/archive.md) | building | archive.py, 0002_archive_tables.py, 0003_callrecord_cached.py, 0004_archivekey_request_shape.py, … |
 | [Auth & secrets — injectors, encryption, OAuth freshness, health](architecture/auth-secrets.md) | shipped | injectors.py, ssrf.py, crypto.py, oauth.py, … |
-| [Endpoint catalog — what you can DO with a connected key, and which provider should do it](architecture/catalog.md) | shipped | contracts.yaml, adapters.yaml, findymail.search.business-profile.json, __init__.py, … |
+| [Endpoint catalog — what you can DO with a connected key, and which provider should do it](architecture/catalog.md) | shipped | contracts.yaml, millionverifier.yaml, millionverifier.people.email.verify.json, millionverifier.account.usage.json, … |
 | [Application composition and deployment roles](architecture/composition.md) | shipped | bootstrap.py, bootstrap_handlers.py, bootstrap_http.py, call_surface.py, … |
 | [Data model — the registry tables, async DB, audit writer](architecture/data-model.md) | shipped | alembic.ini, env.py, 0001_baseline_current_schema.py, 0002_archive_tables.py, … |
+| [Feedback - private intake for problems and suggestions](architecture/feedback.md) | shipped | feedback_contract.py, feedback.py, feedback.py, feedback.py, … |
 | [Enforced import boundaries](architecture/import-boundaries.md) | shipped | pyproject.toml, ci.yml, __init__.py, __init__.py, … |
 | [Instagram OAuth — direct Login and optional Facebook Page tools](architecture/instagram-oauth.md) | built; Meta configuration and live verification pending | catalog_ingest.py, access.py, resolve.py, service.py, … |
 | [Local proxy — catch a program's own outgoing calls (`treg <command>`)](architecture/local-proxy.md) | shipped | localproxy.py, server.js |
 | [Local CLI runs — run a vendor CLI as a dedicated user with a server-held credential (`treg run`)](architecture/local-run.md) | shipped | localrun.py, egress.py, fsjail.py |
-| [MCP — the front door for assistants, and treg as an OAuth authorization server](architecture/mcp-oauth.md) | shipped | auth.py, mcp.py, health.py, mcp_oauth.py, … |
+| [MCP — the front door for assistants, and treg as an OAuth authorization server](architecture/mcp-oauth.md) | shipped | auth.py, mcp.py, mcp_feedback.py, test_mcp_feedback.py, … |
 | [Money — prepaid balance, the ledger, Stripe, and the reports that check it](architecture/money.md) | shipped | __init__.py, settlement.py, __init__.py, models.py, … |
 | [Multi-tenancy — orgs, memberships, invites, per-org scoping](architecture/multi-tenancy.md) | shipped | models.py, api.py, caller_metadata.py, auth.py, … |
 | [The proxy — faithful credential-injecting relay + tool resolution](architecture/proxy-model.md) | shipped | relay.py, ssrf.py, api.py, authorize.py, … |

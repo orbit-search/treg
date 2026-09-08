@@ -252,6 +252,12 @@ adapters:
     miss: "results[0].phones[0].number == null"
 
   # ---- people.email.verify ------------------------------------------------------------------
+  millionverifier.people.email.verify:
+    accepts: [[email]]
+    in:  {email: queryParams.email}
+    out: {valid: "result == 'ok'", status: result}
+    # Like peer verifiers, risky/invalid verdicts are answers; API errors omit quality.
+    miss: "quality == null"
   leadmagic.people.email.verify:
     accepts: [[email]]
     in:  {email: body.email}
@@ -259,7 +265,7 @@ adapters:
     miss: "email_status == null"
   tomba.people.email.verify:
     accepts: [[email]]
-    in:  {email: pathParams.email}
+    in:  {email: queryParams.email}
     out: {valid: "data.email.status == 'valid'", status: data.email.status, score: data.email.score}
     miss: "data.email.status == null"
   hunter.people.email.verify:

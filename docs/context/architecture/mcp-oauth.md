@@ -4,6 +4,8 @@ status: shipped
 sources:
   - src/treg/application/auth.py
   - src/treg/mcp.py
+  - src/treg/mcp_feedback.py
+  - tests/test_mcp_feedback.py
   - src/treg/domain/identity/health.py
   - src/treg/domain/identity/mcp_oauth.py
   - src/treg/domain/identity/session.py
@@ -23,6 +25,40 @@ related:
 ---
 
 # MCP
+
+## Feedback
+
+Both transports expose `feedback(category, message, call_ids?, endpoint_id?)`, using a four-value
+category enum and the shared HTTP intake. This is an additive, non-destructive write on treg,
+not an upstream call. It requires the existing transport identity and spends no balance.
+See [feedback](feedback.md). V2 retains its catalog-only calling boundary.
+
+## Optional feedback hint rollout
+
+Both MCP call surfaces expose the API's `X-Treg-Call-Id` as optional `call_id`. Successful 2xx
+calls may also include a task-oriented `hint`; existing hints and idempotent replays take priority.
+The hint encourages proactive reporting of small annoyances and names concrete friction (guessing, workarounds, unexpected results or charges), welcomes
+reports even when the task succeeds, and names the feedback tool's `call_ids` argument explicitly.
+The provider `body` is unchanged. CLI and direct HTTP responses do not gain a feedback hint.
+
+`mcp_feedback` reads PostHog `/flags?v=2` with the existing `TREG_POSTHOG_KEY` and host. Configure
+boolean flag `mcp-feedback-hint`, enabled for fixed distinct ID `treg-mcp-feedback-hint` (100%
+rollout for that identity), with its enabled payload `{"sample_rate": 0.01}`. This is global
+configuration, not user targeting: **the payload controls per-call sampling**, not the PostHog
+rollout percentage. No new SDK or personal API key is required by the running service.
+
+One background poller is shared by both MCP lifespans, refreshes every 60 seconds with a 3-second
+request timeout, and is cancelled and awaited when the last transport stops. Calls only read the
+cache. Missing/disabled flags, invalid rates, fetch failures, and configuration older than 90 seconds
+disable hints. The payload accepts rates from 0 to 1; use 0 or disable the flag to stop the rollout.
+Changes apply after refresh without a deployment. A new deployment is required to install the code.
+
+Sampling hashes the call ID; when no reference exists it uses a fresh random identifier without
+inventing a public call reference. `mcp_feedback_hint_attached` is a best-effort analytics event
+containing surface, available call ID and the flag marker, never upstream content or credentials.
+It records a hint attached to a result, not proof that a client displayed it or an agent read it.
+Call references can associate reports with exposures; reports without references remain unattributed.
+This initial rollout does not maintain a session-level reminder cap.
 
 ## Provider authorization remediation
 
@@ -76,6 +112,7 @@ of shared behavior.
 | endpoint details | the `/catalog/endpoints/{id}` route and error shape | client attribution |
 | calls | request assembly, credentials, policy, limits, idempotency, relay, errors, metering, audit | team MCP accepts team tools; V2 accepts catalog ids only and splits read/write methods |
 | balance | team selection, grant labels, balance route, error shape | client attribution |
+| feedback | `/feedback`, categories, privacy guidance, team scope and limits | client attribution |
 | catalog requests | `/tool-requests`, rate limit, field limits, caller IP | event source and client attribution |
 | transport | host checks, compression, cache headers, eager auth, static capabilities | V2 has a separate audience, metadata path, scope marker, and Claude browser origin |
 | lifecycle | the transport factory and `mcp_lifespan` | V2 mount and lifespan depend on its feature flag |
@@ -90,7 +127,7 @@ shared behavior and must also prove the listed differences. Keep these V2 proper
 new directory review approves a contract change:
 
 - `/mcp/v2/` is the stable URL, and `/mcp/v2` resolves to the same resource.
-- The tool list has exactly six tools.
+- The tool list has seven tools, including `feedback`; directory submissions must reflect this schema.
 - V2 accepts catalog ids only. It does not list or call arbitrary team tools or passthrough paths.
 - Read and write calls stay separate, and their annotations match their method classes.
 - V1 and V2 OAuth audiences do not cross.
@@ -105,7 +142,7 @@ details, balance, catalog-call results, errors, catalog-only hints, and client a
 `tests/test_marketplace_call.py` proves that the catalog-only API route cannot be shadowed by a
 same-named team tool. A change is incomplete if only one relevant MCP test file is reviewed.
 
-## Team MCP at `/mcp/`: six tools
+## Team MCP at `/mcp/`
 
 | Tool | Job |
 |---|---|
@@ -114,6 +151,7 @@ same-named team tool. A change is incomplete if only one relevant MCP test file 
 | `call` | a catalog endpoint by id, or `<tool-name>/<path>` for the team's own tool |
 | `balance` | the team's prepaid balance |
 | `my_tools` | what the team registered that can be called without holding the key |
+| `feedback` | submit a private problem report or suggestion |
 | `catalog_request` | file what the catalog is MISSING — the demand signal for what gets added next |
 
 Deliberately not one tool per provider. A catalog of 2,600 endpoints exposed as 2,600 MCP tools would
@@ -122,7 +160,7 @@ plus `call` covers all of it and stays the same size.
 
 ## Fixed surface — no change subscriptions
 
-The six-tool MCP surface is static. Weekly catalog refreshes change the DATA returned by
+The MCP surface is static at runtime. Weekly catalog refreshes change the DATA returned by
 `catalog_search` and `catalog_get`; they do not change `tools/list`. treg also publishes no tool,
 prompt or resource change events. `server/discover` therefore advertises
 `tools.listChanged=false`, `prompts.listChanged=false`, `resources.listChanged=false`, and
@@ -137,7 +175,7 @@ idle SSE streams which can never deliver useful work.
 `call` is annotated **destructive + open-world + non-idempotent**, which reads as pessimistic until
 you notice treg does not model the upstream: it relays to somebody else's API and cannot know whether
 that endpoint charges, writes or deletes. Claiming otherwise would be a guess presented as a fact.
-`catalog_request` is the one other non-read: a write, but a harmless one (a row on treg itself,
+`feedback` and `catalog_request` are the other non-reads. `catalog_request` is a write, but a harmless one (a row on treg itself,
 nothing upstream, nothing spent), so it stays closed-world and non-destructive. It relays to
 `POST /tool-requests` so rate limiting and field caps live in one place, forwarding the edge's
 `X-Forwarded-For` — the in-process relay would otherwise collapse every MCP caller into one

@@ -521,12 +521,41 @@ async def test_b2_per_success_404_refunds(
     )
 
 
-async def test_b3_per_call_400_is_billable(
+async def test_b3_per_call_400_without_a_reported_charge_refunds(
     matrix_clients: AsyncClient, fake_provider: FakeProvider, platform_on,
 ) -> None:
+    """A caller-input rejection under per_call is billed on the provider's word, never at the
+    estimate: a 400 whose body carries no charge releases the hold (Fiber's validation 400s
+    settled twenty $0.04 holds against one team on 2026-09-06 under the old rule)."""
     before = await snapshot(matrix_clients, fake_provider)
-    charged = with_margin(EP_CALL_MICRO)
     body = b'{"error":"bad caller input"}'
+
+    response = await matrix_clients.get(
+        f"/call/{EP_CALL}?group_id=1",
+        headers={"X-Fake-Status": "400", "X-Fake-Body": body.decode()},
+    )
+
+    await assert_outcome(
+        matrix_clients, fake_provider, response, before,
+        Expect(
+            status=400,
+            body=body,
+            cost_micro=0,
+            ledger_kinds=("release", "reserve"),
+            ledger_reason="rejected_unbilled_400",
+            audit={"refused_by": None, "cost_charged_micro": 0},
+        ),
+    )
+
+
+async def test_b3b_per_call_400_with_a_reported_charge_bills_exactly_that(
+    matrix_clients: AsyncClient, fake_provider: FakeProvider, platform_on,
+) -> None:
+    """The other half: when the vendor says it took a credit for the rejected request
+    (scrapecreators reports `credits_charged`), the caller pays that — and only that."""
+    before = await snapshot(matrix_clients, fake_provider)
+    charged = with_margin(EP_CALL_MICRO)  # 1 credit at the scrapecreators rate == the estimate
+    body = b'{"error":"bad caller input","credits_charged":1}'
 
     response = await matrix_clients.get(
         f"/call/{EP_CALL}?group_id=1",
@@ -541,7 +570,7 @@ async def test_b3_per_call_400_is_billable(
             cost_micro=charged,
             balance_delta=-charged,
             ledger_kinds=("settle", "reserve"),
-            audit={"refused_by": None, "cost_charged_micro": charged},
+            audit={"refused_by": None, "cost_observed_micro": EP_CALL_MICRO, "cost_charged_micro": charged},
         ),
     )
 

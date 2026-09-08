@@ -12,13 +12,27 @@ related:
 
 # The `treg` CLI
 
+## Feedback
+
+`cmd_feedback` implements `treg feedback submit <category> <message> [--call-id ID] [--endpoint-id ID]`.
+The category choices and help description come from the lightweight `feedback_contract` module.
+Both parent and submit help explain fields, category meanings, optional call-reference mapping,
+privacy and receipt semantics; a reference mentioned only in prose is not automatically linked.
+`--call-id` repeats; message `-` reads stdin. `_client` applies the configured registry and team,
+and `_feedback_request` prints JSON or exits nonzero with an actionable error without echoing
+rejected input. `cmd_feedback_get` implements `treg feedback get <feedback_id>`. Submission transport
+failures report an unconfirmed outcome, not a definite failure. Bare `treg feedback` shows help;
+`main` still accepts the original category-first submission shorthand. See [feedback](../architecture/feedback.md).
+
 ## Instagram grants
 
-`treg connections connect --provider instagram` starts direct Instagram Login, prints the consent
-URL, and polls the normal status endpoint. Page-only tools use `--capability page-tools`. Before
-that consent starts, `POST /oauth/start` returns the selected authorization method's registry
-description and the CLI prints it. The CLI contains no provider-specific guidance. Call errors
-return the exact command for the missing method.
+`TREG_OAUTH_REVIEW_PENDING` and provider-registry metadata control the CLI's effective default and
+guidance. With both Instagram keys pending, `treg connections connect --provider instagram` starts
+the approved Facebook Page core flow. Direct Instagram Login remains explicit with `--capability
+manage`, and Page messaging remains explicit with `--capability page-messages`. Removing the Page
+message key makes the full Page grant the default. Removing the direct key restores direct Instagram
+Login as the default. Before consent starts, `POST /oauth/start` returns the effective guidance and
+the CLI prints it. The CLI contains no provider-specific review logic.
 
 For a catalog endpoint that supports both grants, `treg call <endpoint>
 --authorization-method <method>` selects the grant, upstream host, route, and method-specific
@@ -75,7 +89,13 @@ connect. `_client(cfg)` sends `X-Treg-Token: token` plus `X-Treg-Org: <active_or
 for a per-org token, and picks the org for an identity token). `_effective_org` applies the global
 `--org` override; `_active_org_id` resolves the active org's numeric id via `GET /orgs` (for
 `/orgs/{id}/...` endpoints). `_admin_client` uses `admin_token` else the bearer. `_show` pretty-prints +
-exits non-zero on HTTP >= 400.
+exits non-zero on HTTP >= 400, and on >= 400 first prints one stderr line (`_show_failure_diagnostics`,
+2026-09-05): the HTTP status, whose answer it is (`X-Treg-Error: 1` = treg refused; absent = the
+provider answered and treg relayed it unchanged), the `X-Treg-Call-Id` to quote to support, and the
+`X-Treg-Cost-Micro` charge when the header is present. stdout stays the exact body — a runner that
+saved only stdout filed 115 relayed Moz quota 403s as a bare "cli_error" with no status or id. A
+metered 2xx gets the matching line (`_show_charge_line`: `treg: charged $0.006667 · call id …`,
+replay-aware); no cost header (own key, non-call response) → nothing extra.
 
 **Per-process identity:** `TREG_TOKEN` (+ optional `TREG_ORG`) in the environment beat
 `~/.treg/config.json`, so each coding agent on one machine can run as its own scoped agent —

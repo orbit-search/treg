@@ -91,6 +91,21 @@ async def _hunter(c, key):
                     f"resets {(d.get('data') or {}).get('reset_date')}"}
 
 
+async def _millionverifier(c, key):
+    # Free balance probe. Do not add bulk_credits to credits: they can name the same pool.
+    try:
+        d = await _get(c, "https://api.millionverifier.com/api/v3/credits", params={"api": key})
+    except httpx.HTTPError as exc:
+        # HTTP errors can include the request URL, which contains the private query key.
+        raise ValueError(f"MillionVerifier balance request failed ({type(exc).__name__})") from None
+    if not isinstance(d, dict) or d.get("error"):
+        raise ValueError("MillionVerifier rejected the balance request")
+    credits = d.get("credits")
+    if isinstance(credits, bool) or not isinstance(credits, (int, float)) or credits < 0:
+        raise ValueError("MillionVerifier returned no valid credit balance")
+    return {"value": credits, "unit": "credits", "note": ""}
+
+
 async def _leadmagic(c, key):
     r = await c.post("https://api.leadmagic.io/v1/credits", headers={"X-API-Key": key})
     r.raise_for_status()
@@ -372,6 +387,7 @@ BALANCE_ROUTES = {
     "moz": _moz,
     "seranking": _seranking,
     "hunter": _hunter,
+    "millionverifier": _millionverifier,
     "leadmagic": _leadmagic,
     "lusha": _lusha,
     "diffbot": _diffbot,

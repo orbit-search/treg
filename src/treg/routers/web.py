@@ -1972,7 +1972,9 @@ details.tl li.more a{color:var(--link);text-decoration:none}
 
 
 @app.get("/tools/{service}", include_in_schema=False)
-async def tools_provider(service: str, db: AsyncSession = Depends(get_session)):
+async def tools_provider(service: str, db: AsyncSession = Depends(get_session),
+                         observations: endpoint_stats.EndpointObservationReader = Depends(
+                             _endpoint_observation_reader)):
     """One provider's public page, in the use-case pages' skin (usecase.css): hero on the two
     measured terms — "{provider} api pricing" (what Search Console shows people typing) and
     "{provider} mcp" — the agent->treg->provider flow, setup (agent one-liner first), a prompt
@@ -2032,7 +2034,7 @@ async def tools_provider(service: str, db: AsyncSession = Depends(get_session)):
     badge = "YOUR ACCOUNT" if is_oauth else "NO SIGNUP"
     # The measured line: what treg.to has actually observed calling this provider. It is the one
     # thing a vendor's own pricing page cannot print, and it goes above the fold for that reason.
-    obs = await _observed_or_empty(db, [e["id"] for e in eps])
+    obs = await _observed_or_empty(observations, [e["id"] for e in eps])
     o_samples = sum(int(o.get("samples") or 0) for o in obs.values())
     # The provider-wide rate weights each endpoint's published rate by the calls that DECIDED it
     # (2xx + 5xx). `samples` still counts callers' 4xx, so weighting by it would let one team's
@@ -2731,6 +2733,7 @@ _SITEMAP_PAGES: tuple[tuple[str, str, str], ...] = (
     ("/people-search", "people-search.html", "0.8"),
     ("/grokbot", "grokbot.html", "0.8"),
     ("/fable", "fable-gtm.html", "0.8"),
+    ("/gpt6", "astra.html", "0.8"),
     ("/terms", "terms.html", "0.2"),
     ("/privacy", "privacy.html", "0.2"),
     # The outcome pages. Listed WITHOUT a trailing slash on purpose: `/use-cases/<slug>/` 307s to
@@ -2930,6 +2933,11 @@ async def skill_md():
     return _serve_md("skill.md")
 
 
+@app.get("/feedback.md", include_in_schema=False)
+async def feedback_md():
+    return _serve_md("feedback.md")
+
+
 @app.get("/favicon.svg", include_in_schema=False)
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -3066,6 +3074,22 @@ async def fable_page():
     page = _WEB_DIR / "fable-gtm.html"
     if not page.exists():
         raise HTTPException(status_code=404, detail="fable-gtm.html not bundled")
+    return FileResponse(page, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/astra", include_in_schema=False)
+async def astra_page(request: Request):
+    """Keep launch links and their campaign attribution when moving to /gpt6."""
+    query = request.url.query
+    return RedirectResponse("/gpt6" + (f"?{query}" if query else ""), status_code=301)
+
+
+@app.get("/gpt6", include_in_schema=False)
+async def gpt6_page():
+    """GPT-6 launch destination, with the Codex demo and direct plugin listing."""
+    page = _WEB_DIR / "astra.html"
+    if not page.exists():
+        raise HTTPException(status_code=404, detail="astra.html not bundled")
     return FileResponse(page, headers={"Cache-Control": "no-cache"})
 
 

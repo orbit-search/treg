@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from copy import copy
@@ -66,6 +68,9 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/sitetrack.js', ('GET',), 'sitetrack_js'),
     ('/docs', ('GET',), 'docs_page'),
     ('/tool-requests', ('POST',), 'create_tool_request'),
+    ('/feedback', ('POST',), 'submit_feedback'),
+    ('/feedback/{feedback_id}', ('GET',), 'get_feedback'),
+    ('/admin/feedback', ('GET',), 'admin_feedback'),
     ('/auth/github', ('GET',), 'auth_github'),
     ('/auth/github/callback', ('GET',), 'auth_github_callback'),
     ('/auth/google', ('GET',), 'auth_google'),
@@ -100,6 +105,7 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/vendor-listing', ('GET',), 'vendor_listing_md'),
     ('/integrate.md', ('GET',), 'integrate_md'),
     ('/skill.md', ('GET',), 'skill_md'),
+    ('/feedback.md', ('GET',), 'feedback_md'),
     ('/favicon.ico', ('GET',), 'favicon'),
     ('/favicon.svg', ('GET',), 'favicon'),
     ('/tutorial.js', ('GET',), 'tutorial_js'),
@@ -112,6 +118,8 @@ _CONTROL_ROUTE_KEYS: frozenset[RouteKey] = frozenset({
     ('/resources', ('GET',), 'resources_page'),
     ('/grokbot', ('GET',), 'grokbot_page'),
     ('/fable', ('GET',), 'fable_page'),
+    ('/astra', ('GET',), 'astra_page'),
+    ('/gpt6', ('GET',), 'gpt6_page'),
     ('/people-search', ('GET',), 'people_search_page'),
     ('/usecase.css', ('GET',), 'usecase_css'),
     ('/oauth/register', ('POST',), 'oauth_register'),
@@ -413,6 +421,44 @@ def _route_manifest(routes: Sequence[BaseRoute]) -> list[str]:
     return result
 
 
+_POOL_GAUGE_SAMPLE_S = 1.0
+_POOL_GAUGE_EMIT_S = 60.0
+
+
+async def pool_gauge(*, sample_s: float = _POOL_GAUGE_SAMPLE_S,
+                     emit_s: float = _POOL_GAUGE_EMIT_S) -> None:
+    """Every minute, one `db_pool_gauge` event: the peak connections each pool had checked out in
+    that minute, next to its capacity. The reading behind `TREG_DB_POOL_OVERRIDES`: a pool whose
+    peak sits at capacity is one whose waiters are timing out (api: `503 treg_saturated`;
+    background: an audit or archive row dropped after `pool_timeout`), and a pool whose peak never
+    nears it is holding connections nothing uses. Sampling is a counter read, no I/O; a bad pass
+    never kills the loop. Telemetry, not a database consumer - so it is not in
+    `ROLE_BACKGROUND_TASKS` and runs in every role."""
+    from .infra.db import fold_pool_peaks, pool_snapshot
+    peaks: dict[str, int] = {}
+    samples = 0
+    opened = time.monotonic()
+    while True:
+        try:
+            fold_pool_peaks(peaks, pool_snapshot())
+            samples += 1
+            if time.monotonic() - opened >= emit_s:
+                snapshot = pool_snapshot()
+                props: dict = {"samples": samples, "window_s": round(time.monotonic() - opened)}
+                for name, row in snapshot.items():
+                    props[f"{name}_peak"] = peaks.get(name, 0)
+                    props[f"{name}_capacity"] = row["capacity"]
+                    props[f"{name}_headroom"] = row["capacity"] - peaks.get(name, 0)
+                if snapshot:
+                    analytics.capture(analytics.SERVER_DISTINCT_ID, "db_pool_gauge", props)
+                peaks, samples, opened = {}, 0, time.monotonic()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a gauge must never take the service down
+            logging.getLogger("treg").exception("db pool gauge pass failed")
+        await asyncio.sleep(sample_s)
+
+
 def _lifespan(role: AppRole):
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -428,6 +474,7 @@ def _lifespan(role: AppRole):
             if ROLE_BACKGROUND_TASKS[role] and adsconv.enabled()
             else None
         )
+        gauge_task = asyncio.create_task(pool_gauge()) if analytics.enabled() else None
         # The archive's refresh worker (docs/context/architecture/archive.md): serve mode only,
         # and a zero daily cap disables it without touching serving. Same discipline as the ads
         # task — in-process, cancelled on shutdown, a bad pass never kills the loop.
@@ -460,6 +507,8 @@ def _lifespan(role: AppRole):
                     yield
         finally:
             try:
+                if gauge_task is not None:
+                    gauge_task.cancel()
                 if ads_task is not None:
                     ads_task.cancel()
                 if archive_task is not None:

@@ -1079,3 +1079,93 @@ async def test_same_key_recordings_allocate_distinct_versions(clients: AsyncClie
     keys, snaps = await _rows()
     assert len(keys) == 1
     assert [snap.version for snap in snaps] == list(range(1, 13))
+
+
+# ---- the 2026-09-07 OOM regression test: memory-bounded pending work ---------------------------
+# _MAX_PENDING_BYTES caps total body bytes held by pending tasks. Without it, 512 pending tasks ×
+# 8 MB bodies = 4 GB worst case — the exact OOM that killed production at 2026-09-07T00:43:06Z.
+
+
+async def test_pending_body_bytes_are_bounded_and_excess_is_shed(monkeypatch):
+    """The bytes bound sheds recordings before the count bound would — the 2026-09-07 OOM fix.
+
+    With _MAX_CONCURRENT_WRITES=2 and heavy traffic, pending tasks holding large bodies can
+    accumulate faster than they drain. The bytes cap ensures total memory held by pending work
+    never exceeds a threshold, regardless of how many tasks fit under _MAX_PENDING.
+    """
+    import asyncio as aio
+
+    release = aio.Event()
+
+    async def blocked_store(**kw):
+        await release.wait()
+
+    monkeypatch.setattr(archive, "_store_locked", blocked_store)
+    monkeypatch.setattr(archive, "_sem", None)
+    monkeypatch.setattr(archive, "_key_locks", None)
+    monkeypatch.setattr(archive, "_pending_bytes", 0)
+    archive._pending.clear()
+    original_max_bytes = archive._MAX_PENDING_BYTES
+    monkeypatch.setattr(archive, "_MAX_PENDING_BYTES", 1000)
+
+    common = dict(method="GET", endpoint_id=EP, provider="tikhub", caller_body=b"",
+                  headers={}, status_code=200, media_type="application/json")
+    try:
+        archive.record(url="https://api.example/1", body=b"x" * 400, **common)
+        assert len(archive._pending) == 1
+        assert archive._pending_bytes == 400
+
+        archive.record(url="https://api.example/2", body=b"y" * 400, **common)
+        assert len(archive._pending) == 2
+        assert archive._pending_bytes == 800
+
+        archive.record(url="https://api.example/3", body=b"z" * 300, **common)
+        assert len(archive._pending) == 2, "third recording should be shed (800 + 300 > 1000)"
+        assert archive._pending_bytes == 800
+
+        archive.record(url="https://api.example/4", body=b"w" * 150, **common)
+        assert len(archive._pending) == 3, "fourth recording should fit (800 + 150 <= 1000)"
+        assert archive._pending_bytes == 950
+    finally:
+        release.set()
+        monkeypatch.setattr(archive, "_MAX_PENDING_BYTES", original_max_bytes)
+        await aio.gather(*archive._pending, return_exceptions=True)
+        archive._pending.clear()
+        monkeypatch.setattr(archive, "_pending_bytes", 0)
+
+
+async def test_pending_bytes_released_when_task_completes(monkeypatch):
+    """The done callback releases body bytes so they can be reused by new recordings."""
+    import asyncio as aio
+
+    release = aio.Event()
+    entered = aio.Event()
+
+    async def blocking_store(**kw):
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(archive, "_store_locked", blocking_store)
+    monkeypatch.setattr(archive, "_sem", None)
+    monkeypatch.setattr(archive, "_key_locks", None)
+    monkeypatch.setattr(archive, "_pending_bytes", 0)
+    archive._pending.clear()
+
+    common = dict(method="GET", endpoint_id=EP, provider="tikhub", caller_body=b"",
+                  headers={}, status_code=200, media_type="application/json")
+    try:
+        archive.record(url="https://api.example/1", body=b"x" * 500, **common)
+        await aio.wait_for(entered.wait(), timeout=1)
+        assert archive._pending_bytes == 500
+
+        release.set()
+        await aio.gather(*archive._pending, return_exceptions=True)
+        await aio.sleep(0)
+
+        assert archive._pending_bytes == 0, "bytes should be released when task completes"
+        assert len(archive._pending) == 0
+    finally:
+        release.set()
+        await aio.gather(*archive._pending, return_exceptions=True)
+        archive._pending.clear()
+        monkeypatch.setattr(archive, "_pending_bytes", 0)

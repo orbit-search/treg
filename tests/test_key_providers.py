@@ -18,8 +18,9 @@ from treg import oauth_providers as P
 def test_key_providers_are_offerable_without_deployment_credentials():
     """The user brings the key, so treg holds no app of its own — a key provider must be offerable,
     not shown as 'not configured' the way an unset OAuth provider is."""
-    for svc in ("orbit", "apollo", "pdl", "akta", "hunter", "crunchbase", "tikhub", "brightdata", "semrush",
+    for svc in ("orbit", "apollo", "pdl", "akta", "hunter", "millionverifier", "crunchbase", "tikhub", "brightdata", "semrush",
                 "justoneapi", "dataforseo", "seranking", "moz", "majestic", "serpstat", "exa",
+                "cloro",
                 "lusha", "coresignal", "diffbot", "thecompaniesapi", "leadmagic", "fiber-ai",
                 "companyenrich", "oceanio", "tomba", "predictleads", "findymail", "branddev",
                 "icypeas", "leadsforge", "influencersclub", "crustdata", "aviato",
@@ -232,3 +233,40 @@ async def test_query_token_survives_alongside_a_probe_path_query(clients: AsyncC
         probe_path="/needs-query?field=title", token_verify_field=""))
     r = await clients.post("/connections/token", json={"provider": "spyfu", "token": "spyfu-secret"})
     assert r.status_code == 200, r.text
+
+
+async def test_millionverifier_connect_checks_body_and_injects_query(clients, monkeypatch):
+    """The live bad-key response is HTTP 200; zero credits must not reject a valid key."""
+    import httpx
+    from treg.api import app
+
+    def probe(request):
+        assert request.url.path == "/api/v3/credits"
+        assert "authorization" not in request.headers
+        if request.url.params["api"] == "bad-key":
+            return httpx.Response(200, json={"result": "error", "error": "apikey_not_found"})
+        return httpx.Response(200, json={"credits": 0, "bulk_credits": 0, "renewing_credits": 0, "plan": 4})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(probe)) as upstream:
+        monkeypatch.setattr(app.state, "http", upstream)
+        bad = await clients.post("/connections/token", json={"provider": "millionverifier", "token": "bad-key"})
+        assert bad.status_code == 422, bad.text
+        assert "apikey_not_found" in bad.text
+        assert not (await clients.get("/tools")).json()
+        good = await clients.post("/connections/token", json={"provider": "millionverifier", "token": "good-key"})
+        assert good.status_code == 200, good.text
+        tool = next(t for t in (await clients.get("/tools")).json() if t["name"] == "millionverifier")
+        binding = tool["bindings"][0]
+        assert binding["location"] == "query" and binding["name"] == "api"
+        assert binding["format"] == "{secret}"
+
+
+def test_millionverifier_platform_key_configuration(monkeypatch):
+    from treg.config import Settings
+    monkeypatch.setenv("TREG_PLATFORM_KEY_MILLIONVERIFIER", "platform-test-key")
+    monkeypatch.setenv("TREG_PLATFORM_PROVIDERS", "millionverifier")
+    settings = Settings(_env_file=None)
+    assert settings.platform_key_for("millionverifier") == "platform-test-key"
+    assert P.platform_bindings(P.get("millionverifier")) == [
+        {"platform_setting": "platform_key_millionverifier", "injector": "env",
+         "location": "query", "name": "api", "format": "{secret}"}]

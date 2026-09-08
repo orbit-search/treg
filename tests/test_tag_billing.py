@@ -677,10 +677,11 @@ async def test_a_pin_cannot_smuggle_what_the_header_cannot(clients: AsyncClient)
 
 # ---- the invariants an invoice actually rests on -------------------------------------------------
 async def test_usage_survives_a_dead_audit_pipeline(clients: AsyncClient, platform_on, monkeypatch):
-    """THE test that proves an invoice never depends on a lossy table. `audit._schedule` sheds rows
-    past its queue bound and swallows every exception — precisely under the load a successful builder
-    generates. With the audit pipeline entirely dead, the money must still be complete."""
-    monkeypatch.setattr(audit, "_schedule", lambda coro: coro.close())
+    """THE test that proves an invoice never depends on a lossy table. `audit._enqueue` sheds rows
+    past its queue bound and the writer swallows every exception — precisely under the load a
+    successful builder generates. With the audit pipeline entirely dead, the money must still be
+    complete."""
+    monkeypatch.setattr(audit, "_enqueue", lambda model, fields: None)
     org_id = await _org_id(clients)
     for who in ("cust_A", "cust_B"):
         r = await clients.get(f"/call/{EP}?aweme_id=7", headers={"X-Treg-Meta": f"customer={who}"})
@@ -772,15 +773,17 @@ async def test_a_provider_credential_refusal_is_never_billed(clients: AsyncClien
         assert await ledger.tag_invoice_since(db, org_id, "customer", "cust_A", _EPOCH) == 0
 
 
-async def test_a_caller_input_4xx_is_still_billed_on_a_per_call_endpoint(clients: AsyncClient,
-                                                                        platform_on, monkeypatch):
-    """The other half of the rule stays: the provider DOES charge for accepting a malformed request,
-    so a caller's own bad input is on the caller."""
+async def test_a_caller_input_4xx_may_bill_only_on_a_per_call_endpoint(clients: AsyncClient,
+                                                                       platform_on, monkeypatch):
+    """The other half of the rule: a caller's own bad input MAY be on the caller, but only under
+    `per_call` and only at the charge the provider reports for it (an unreported 400 releases —
+    `test_a_4xx_bills_only_what_the_provider_reports` in test_marketplace_call.py). The status
+    gate itself is asserted here because tikhub comments is per_success and always releases."""
     org_id = await _org_id(clients)
     monkeypatch.setattr(call_service, "relay", _fake_relay(400, b'{"error":"bad param"}'))
     r = await clients.get(f"/call/{EP}?aweme_id=7", headers={"X-Treg-Meta": "customer=cust_A"})
     assert r.status_code == 400
-    # tikhub comments is per_success, so 400 releases; assert the RULE directly for per_call.
+    assert r.headers.get("X-Treg-Cost-Micro") == "0"
     assert call_settle._platform_billable(400, "per_call") is True
     assert call_settle._platform_billable(404, "per_call") is True
     assert call_settle._platform_billable(402, "per_call") is False

@@ -428,6 +428,58 @@
         "title": "ExtraCredentialIn",
         "type": "object"
       },
+      "FeedbackIn": {
+        "additionalProperties": false,
+        "properties": {
+          "call_ids": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Call Ids",
+            "type": "array"
+          },
+          "category": {
+            "enum": [
+              "quality",
+              "pricing",
+              "friction",
+              "other"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "endpoint_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9_.-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Endpoint Id"
+          },
+          "message": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "message"
+        ],
+        "title": "FeedbackIn",
+        "type": "object"
+      },
       "GrantIn": {
         "properties": {
           "argv": {
@@ -5846,6 +5898,149 @@
           }
         },
         "summary": "Demo Sandbox Skill"
+      }
+    },
+    "/feedback": {
+      "post": {
+        "operationId": "submit_feedback_feedback_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-treg-token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Treg-Token",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-treg-org",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Treg-Org",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "treg_session",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Treg Session",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Feedback Feedback Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit Feedback"
+      }
+    },
+    "/feedback/{feedback_id}": {
+      "get": {
+        "operationId": "get_feedback_feedback__feedback_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "feedback_id",
+            "required": true,
+            "schema": {
+              "title": "Feedback Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-treg-token",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Treg-Token",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-treg-org",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "X-Treg-Org",
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "treg_session",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Treg Session",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Feedback Feedback  Feedback Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Feedback"
       }
     },
     "/health": {

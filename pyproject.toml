@@ -1,6 +1,6 @@
 [project]
 name = "tools-registry"
-version = "0.15.0"
+version = "0.16.1"
 description = "A remote registry that turns team skills into shareable, callable tools via a credential-injecting proxy."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -76,6 +76,11 @@ dev = [
 test = [
     "playwright>=1.62.0",
 ]
+
+[tool.uv]
+# uv.lock is `revision = 3`; uv < 0.8.4 silently rewrites it to revision 2 (a ~650-line diff
+# that changes no versions). Refuse to run on an old uv rather than teach everyone to avoid `uv lock`.
+required-version = ">=0.12"
 
 [tool.importlinter]
 root_package = "treg"
@@ -285,5 +290,29 @@ name = "Capacity domain does not depend on outer layers"
 type = "forbidden"
 source_modules = ["treg.domain.capacity"]
 forbidden_modules = ["treg.api", "treg.routers", "treg.application", "treg.bootstrap", "fastapi", "starlette", "treg.audit"]
+allow_indirect_imports = true
+as_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Feedback domain does not depend on outer layers or sibling domains"
+type = "forbidden"
+source_modules = ["treg.domain.feedback"]
+forbidden_modules = [
+    "treg.api",
+    "treg.bootstrap",
+    "treg.routers",
+    "treg.application",
+    "treg.audit",
+    "treg.domain.identity",
+    "treg.domain.governance",
+    "treg.domain.connections",
+    "treg.domain.tools",
+    "treg.domain.catalog",
+    "treg.domain.capacity",
+    "treg.domain.money",
+    "treg.domain.asynctasks",
+    "fastapi",
+    "starlette",
+]
 allow_indirect_imports = true
 as_packages = true

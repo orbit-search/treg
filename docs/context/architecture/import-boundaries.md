@@ -33,6 +33,7 @@ sources:
   - src/treg/domain/connections/oauth_flow.py
   - src/treg/domain/connections/refresh.py
   - src/treg/domain/money/__init__.py
+  - src/treg/domain/feedback.py
   - src/treg/domain/asynctasks/__init__.py
   - src/treg/domain/capacity/__init__.py
   - src/treg/infra/upstream/__init__.py
@@ -51,13 +52,18 @@ related:
 # Enforced import boundaries
 
 Import Linter reads the contracts under `tool.importlinter` in `pyproject.toml`. The main CI `test`
-job installs the hand-maintained lock with `uv sync --frozen`, then runs
-`uv run --frozen lint-imports` before the test suite. Keeping the check in that job reuses the
+job installs the lock with `uv sync --locked` (failing on a stale lock), then runs
+`uv run --locked lint-imports` before the test suite. Keeping the check in that job reuses the
 development environment and avoids a second install for a fast static architecture check.
 The separate `test-postgres` job runs its database-sensitive subset serially against Postgres 16;
 it uses unbuffered Python output and a 15-minute job budget so a slow test remains diagnosable. The
 subset includes agent attribution, credential health, local-run reporting and ads-conversion coverage
 so naive-UTC assumptions are exercised by asyncpg rather than hidden by SQLite's permissive adapter.
+
+The required `gitleaks` job scans the complete history reachable from checked-out `HEAD` with
+`--log-opts="HEAD"`. On pull requests, checkout supplies the merge commit, so both the base and
+proposed branch histories are included. Deleted secrets remain detectable; unrelated fetched
+branch tips do not block this PR. Detection rules and allowlists are unchanged.
 
 Stage 1 activated the first two contracts:
 
@@ -135,3 +141,8 @@ aggregator envelopes and the money primitives, and the aggregator adapters stay 
 aggregator envelopes live under `treg.infra.upstream.aggregators` and inherit the upstream contract
 (no HTTP adapters, no routers); the capacity domain's `verify` module may import them because they are
 pure envelope code, not a web framework.
+
+The feedback domain (`treg.domain.feedback`) owns durable report inserts and queries. Its contract
+forbids direct imports of API, bootstrap, routers, application orchestration, sibling domains,
+best-effort audit, FastAPI, and Starlette. Shared models and SQLAlchemy remain available; transaction
+commits and call-reference verification belong to `treg.application.feedback`.

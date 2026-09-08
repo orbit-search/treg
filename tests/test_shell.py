@@ -644,7 +644,16 @@ def _hide_cryptography(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", _fake)
 
 
-def test_a_non_interactive_run_prints_the_command_instead_of_prompting(monkeypatch):
+@pytest.fixture
+def proxy_installer(monkeypatch):
+    # Prompt/error tests need an installer, independently of the machine's PATH and Python setup.
+    # Installer discovery itself is covered by the tests above.
+    monkeypatch.setattr(cli, "_proxy_install_hint", lambda: (
+        "pip", [cli.sys.executable, "-m", "pip", "install", "cryptography>=43"],
+    ))
+
+
+def test_a_non_interactive_run_prints_the_command_instead_of_prompting(monkeypatch, proxy_installer):
     """In CI or a pipe there is nobody to answer, so it must exit saying exactly what to run — never
     hang on a prompt nobody can see."""
     _hide_cryptography(monkeypatch)
@@ -654,7 +663,7 @@ def test_a_non_interactive_run_prints_the_command_instead_of_prompting(monkeypat
     assert "cryptography>=43" in str(exc.value)
 
 
-def test_declining_leaves_the_command_behind(monkeypatch):
+def test_declining_leaves_the_command_behind(monkeypatch, proxy_installer):
     _hide_cryptography(monkeypatch)
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _p: "n")
@@ -664,7 +673,7 @@ def test_declining_leaves_the_command_behind(monkeypatch):
     assert "cryptography>=43" in str(exc.value)
 
 
-def test_a_failed_install_says_so_rather_than_carrying_on(monkeypatch):
+def test_a_failed_install_says_so_rather_than_carrying_on(monkeypatch, proxy_installer):
     _hide_cryptography(monkeypatch)
     monkeypatch.setattr(cli.subprocess, "call", lambda *a, **k: 1)
     with pytest.raises(SystemExit) as exc:

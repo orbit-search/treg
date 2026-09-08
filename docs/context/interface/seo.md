@@ -13,6 +13,9 @@ sources:
   - src/treg/web/people-search.html
   - src/treg/web/grokbot.html
   - src/treg/web/fable-gtm.html
+  - src/treg/web/astra.html
+  - src/treg/web/media/astra/page.css
+  - src/treg/web/media/astra/page.js
   - src/treg/web/llms.txt
   - scripts/indexnow_submit.py
   - src/treg/web/support.html
@@ -39,6 +42,30 @@ answering 405 everywhere, no `og:`/`twitter:` tags or image, no structured data,
 FastAPI's stock Swagger shell — a kilobyte of JavaScript to anything that does not run scripts.
 
 ## The pieces
+
+`/gpt6` is the launch-film destination, served by `gpt6_page` as bundled,
+no-cache HTML and included in the sitemap and route ownership manifest. `/astra` redirects
+permanently to `/gpt6`, preserving query parameters for campaign attribution. It leads with
+“Give GPT6 Astra any data & tools” and a native-styled, self-playing Codex workflow:
+prompt, provider comparison, scan and selection, email/phone enrichment, then the cost receipt.
+The preview pauses off screen, respects reduced motion, and opens the `warm-paper` launch film
+on click. After the enrichment gallery, a subscription comparison pairs pricing with the
+illustrative usage receipt. The “One plugin” catalog cards follow pricing, then the
+“Not just lead enrichment” use cases. On small
+screens, pricing stacks vertically and the demo switches between chat and contact results.
+
+The “One skill. Every enrichment job.” section follows the benchmark, reusing the nine-card
+people-search gallery, responsive layout and on-screen animations with reduced-motion support.
+Its final card links to `/catalog`.
+
+Benchmark tabs identify the evaluated agent as Claude Code, rather than presenting its scores
+as an Astra evaluation. Use-case prompts are copyable; plugin CTAs open the treg listing on
+`chatgpt.com/plugins`. Account setup follows the launch-page convention: members continue to
+`/app?ref=gpt6`; other visitors see a native sign-in dialog with the existing OAuth links and
+email-code endpoints (`/auth/email/start` and `/auth/email/verify`). The page uses `sitetrack.js`,
+`adtrack.js` and `gtag.js` for the existing attribution path; `data-page="gpt6"` identifies
+the landing page in ad-click capture. Campaign links should carry `utm_*` parameters for
+server-side first-touch attribution across signup, first successful call and top-up.
 
 | Path | What it is |
 |---|---|
@@ -83,6 +110,26 @@ The scope is **`_page()` callers**, not "every server-rendered page". `_legal_pa
 render their own HTML and remain uninstrumented — none is an ad destination. `/tutorial` is likewise
 out of scope; it is slated for removal. The `.md` variants are `text/plain` and cannot run scripts.
 
+That scope left a third class uncovered, and the same failure repeated on it (2026-09-06).
+`/people-search`, `/grokbot` and `/fable` are standalone hand-written HTML behind their own routes:
+off the shell, so `_page()` does not reach them, and absent from the hand-kept list in
+`test_every_public_landing_surface_loads_the_capture_script`, so nothing failed. All three are ad
+destinations — the Demand Gen campaign pointed S1, S2 and S3 at `/people-search` — and for three
+days 4,892 clicks landed on a page that could not capture a click id. The DB holds no GCLID from
+that window at all, which reads identically to an audience that simply does not convert: the
+measurement failure and the outcome it was meant to measure are indistinguishable from the numbers.
+All three now carry the tag, and the guard no longer depends on anyone remembering:
+`test_every_public_html_route_carries_the_capture_script` sweeps every flat GET route on the app,
+keeps whatever answers `200 text/html`, and requires the tag on all of it. Adding a route that
+serves HTML puts it in scope automatically — the sweep is verified to catch both a landing page
+that loses the tag and a brand-new route that never had one. Parameterised routes stay out of
+scope because they all render through `_page()`, which carries the tag structurally.
+
+The default is therefore inverted: a public HTML page carries capture unless `CAPTURE_EXEMPT` names
+it with a reason (legal and support pages, `/tutorial`, the connector setup page, FastAPI's Swagger
+shell, the superadmin panel). The sweep also fails on a stale exemption, so the list cannot outlive
+the pages it excuses.
+
 `/sitetrack.js` is deliberately NOT in the shell. It already shipped more widely than `adtrack.js`
 (it is on `tutorial.html` too), but it can load PostHog with pageview/session-recording config while
 `web/privacy.html` promises no analytics or session-replay scripts and lists no such processor.
@@ -90,6 +137,18 @@ Broadening it across the pSEO surface is a product/legal decision, not a side ef
 attribution — `treg_ad` and `/adtrack.js` are already documented in that policy, so shipping those
 alone changes nothing about it. `tests/test_agent_pages.py` asserts exactly one `adtrack.js` per
 path so a new route off `_page()` cannot drop it.
+
+The hand-written marketing pages are the other half of that decision, and they get the opposite
+default: a standalone landing page *does* load `/sitetrack.js`, because without it the page emits no
+pageview and cannot be measured at all. That escaped once too (2026-09-07): `/grokbot` shipped with
+`/adtrack.js` and `/gtag.js` but not `/sitetrack.js`, so a week of launch traffic produced zero
+`$pageview`s and the route simply did not exist in a per-landing-page funnel — indistinguishable
+from a page nobody visited. `tests/test_sitetrack.py` now guards the hand-written surface the same
+way `test_adsconv.py` guards ad capture: a named list of marketing surfaces fetched over HTTP, plus
+a file-level invariant that any `web/*.html` carrying an ad script tag also carries the analytics
+one, so a page copied from an existing landing is in scope the moment it exists. Script paths are
+root-absolute (`/sitetrack.js`, never `sitetrack.js`); the relative form on `/people-search` and
+`/fable` only resolved because those routes are slashless, and the same test forbids it.
 
 ## The public catalog is the marketplace, not a copy of it
 

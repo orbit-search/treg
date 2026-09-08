@@ -8,9 +8,9 @@ so every list/call/mutation is scoped to the caller's org. See docs/MULTI-TENANC
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import BigInteger, JSON, Column, Index, UniqueConstraint, text
+from sqlalchemy import BigInteger, JSON, Column, Index, Integer, UniqueConstraint, text
 from sqlmodel import Field, SQLModel
 
 # Role ordering for gates (owner > admin > member > viewer).
@@ -44,6 +44,14 @@ class Org(SQLModel, table=True):
     # conditional UPDATE against this integer is what stops concurrent agent calls racing past zero
     # (see ledger.reserve). Only `domain/money` may write it.
     balance_micro: int = Field(default=0)
+    # "Committed since midnight UTC": everything settled today plus everything still held from
+    # today - the number the fail-closed daily cap is checked against on EVERY metered call. Kept
+    # here, in the same UPDATE that moves the balance, because the equivalent aggregate over
+    # `ledgerentry` cost a scan of the platform's whole day per call and emptied the API pool
+    # (revision 0022). Written ONLY by domain/money; `spent_today_day` says which UTC day the
+    # counter belongs to, and a movement on a later day resets it.
+    spent_today_micro: int = Field(default=0, sa_column=Column("spent_today_micro", BigInteger, nullable=False, server_default="0"))
+    spent_today_day: date | None = Field(default=None)
 
     # ---- Stripe billing (see billing.py; NO card data ever lands here) ----------------------------
     # The org's Stripe Customer. Created lazily on the first top-up and reused forever after, because
@@ -166,8 +174,15 @@ class Membership(SQLModel, table=True):
     promoted_from: str = Field(default="")
     webhook_url: str | None = Field(default=None)  # health alerts for this member's org POST here
     # Per-user, per-day usage cap for this org (counts proxy calls + local + server runs). -1 = unlimited
-    # (the default — nobody is capped until an admin sets a limit). See api._enforce_daily_cap.
+    # (the default — nobody is capped until an admin sets a limit). See governance/usage.enforce_daily_cap.
     daily_call_cap: int = Field(default=-1)
+    # The number that cap is checked against: usage events the gate has admitted since midnight
+    # UTC, and which UTC day it belongs to. Taken with ONE conditional UPDATE per capped call, so
+    # the check costs no count over `callrecord` (which had read a member's whole history per
+    # call - revision 0024) and the cap is exact rather than "a few extra slip through". Only
+    # capped members are counted; the roster's `used_today` still reads the journal.
+    calls_today: int = Field(default=0, sa_column=Column("calls_today", Integer, nullable=False, server_default="0"))
+    calls_today_day: date | None = Field(default=None)
     # Per-member tool ACL: NULL = ALL tools in the org (the default — no restriction, no regression); a
     # JSON list of tool NAMES = the ONLY tools this member may call or run. See api._require_tool_access.
     tool_access: list | None = Field(default=None, sa_column=Column("tool_access", JSON, nullable=True))
@@ -232,7 +247,29 @@ class CallRecord(SQLModel, table=True):
                       # Without the pair, the planner walked the WHOLE table backward via the
                       # primary key, testing endpoint_id row by row — measured 7.5s per click on
                       # prod (2026-09-03). With it, the same question is a 30-row index read.
-                      Index("ix_callrecord_endpoint_id_id", "endpoint_id", "id"),)
+                      Index("ix_callrecord_endpoint_id_id", "endpoint_id", "id"),
+                      # EVERY question asked of this table is "… since <time>", and until now no
+                      # index carried `created_at`, so the planner picked an index for the other
+                      # column and filtered the date in memory — reading the endpoint's or the
+                      # org's WHOLE history to answer a 30-day question. Measured on prod
+                      # 2026-09-06 at 2.94M rows / 1.68 GB: `ix_callrecord_endpoint_id_id` had
+                      # read 1.60 BILLION tuples across 570k scans (the catalog observation
+                      # refresh, `domain/catalog/stats.py`, WINDOW_DAYS=30), `ix_callrecord_org_id`
+                      # 295M across 70k (the per-member daily counts in `routers/orgs.py`), and
+                      # the table had taken 80,932 sequential scans for 27 BILLION tuples.
+                      #
+                      # That load is why the API pool saturates: the three pools bulkhead
+                      # CONNECTIONS, not the one database's CPU, so a scan of this table makes
+                      # every 3 ms request query queue behind it until `pool_timeout` fires and
+                      # callers get `503 treg_saturated`. Sizing the pool cannot fix a scan.
+                      Index("ix_callrecord_endpoint_id_created_at", "endpoint_id", "created_at"),
+                      # The per-user daily call cap (`governance/usage.count_today`, on every
+                      # capped call): "this org, this member, since midnight". Without the triple
+                      # the planner BitmapAnd-ed the member's WHOLE history through
+                      # `ix_callrecord_user_email` - measured 2.6 s of 3.0 s on prod 2026-09-06 for
+                      # a member with 287k rows. Revision 0023 builds it concurrently.
+                      Index("ix_callrecord_org_id_user_email_created_at", "org_id", "user_email", "created_at"),
+                      Index("ix_callrecord_org_id_created_at", "org_id", "created_at"),)
 
     id: int | None = Field(default=None, primary_key=True)
     org_id: int | None = Field(default=None, foreign_key="org.id", index=True)
@@ -241,7 +278,8 @@ class CallRecord(SQLModel, table=True):
     method: str
     path: str
     status_code: int
-    # Which execution path produced this row: "call" (proxy /call) or "local_run" (/tools/{name}/grant).
+    # Execution path: "call", "async_poll" (owned free status read, hidden from Activity),
+    # or "local_run" (/tools/{name}/grant).
     # Server-side CLI runs live in RunRecord ("server_run"). Lets the usage view break down by kind.
     kind: str = Field(default="call")
     # The RUNTIME that made the call — "claude-code", "codex", "cursor", … — self-reported by the
@@ -653,6 +691,17 @@ class LedgerEntry(SQLModel, table=True):
     reserve/settle is negative. `call_id` correlates the reserve→settle / reserve→release pair.
     """
 
+    # `(org_id, created_at)` is what EVERY metered call pays for: `ledger.spent_today` (the
+    # fail-closed daily cap, inside the reserve transaction on an api-pool connection) asks
+    # "this org, since midnight". With only single-column indexes the planner walked the whole
+    # platform's day and filtered the org in memory - measured on prod 2026-09-06 at 4.38M rows:
+    # 322k rows discarded and 381k buffer touches per call, 56-106 s once the day's pages were
+    # cold, each one holding an api-pool slot. That was the `503 treg_saturated` mechanism, and
+    # this table (not `callrecord`) was the largest IO consumer in the database. The pair also
+    # serves `entries_of` (`/billing`), which had walked the whole `created_at` index backward.
+    # Revision 0021 builds it concurrently.
+    __table_args__ = (Index("ix_ledgerentry_org_id_created_at", "org_id", "created_at"),)
+
     id: str = Field(primary_key=True)  # uuid4 hex
     org_id: int = Field(foreign_key="org.id", index=True)
     block_id: str | None = Field(default=None, index=True)
@@ -703,6 +752,8 @@ class AsyncTaskRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now, index=True)
     next_check_at: datetime = Field(index=True)
     attempts: int = Field(default=0)
+    consecutive_failures: int = Field(
+        default=0, sa_column=Column(Integer, nullable=False, server_default="0"))
     status: str = Field(default="pending", index=True)
     error: str = Field(default="")
     settled_micro: int | None = Field(default=None)
@@ -1075,6 +1126,24 @@ class IdempotentCall(SQLModel, table=True):
     charged_micro: int = Field(default=0)
     created_at: datetime = Field(default_factory=_now)
     expires_at: datetime
+
+
+class Feedback(SQLModel, table=True):
+    """A private team report, persisted before acknowledging receipt.
+
+    call_ids and endpoint_id are submitted claims. verified_call_ids contains only references
+    found in this team's audit or ledger; it verifies provenance, not the report's conclusion.
+    """
+
+    id: int | None = Field(default=None, primary_key=True)
+    org_id: int = Field(foreign_key="org.id", index=True)
+    user_email: str
+    category: str = Field(index=True)
+    message: str
+    call_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    verified_call_ids: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    endpoint_id: str | None = Field(default=None)
+    created_at: datetime = Field(default_factory=_now)
 
 
 class ToolRequest(SQLModel, table=True):

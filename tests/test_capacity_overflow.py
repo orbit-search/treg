@@ -661,3 +661,67 @@ async def test_a_vendor_402_overflow_did_not_rescue_keeps_the_vendor_error_event
     (e,) = await posthog_events()
     p = e["properties"]
     assert p["status_code"] == 402 and p["outcome"] == "vendor_error" and p["tier"] == "platform" and "served_via" not in p
+
+
+# ---- the weekly verify: renewals are held to their own cap and the run to a budget -------------
+# On 2026-09-07 the cron (`verify --all`, 2¢ cap) skipped every stamped route priced above 2¢ - 46
+# routes mapped and verified on 2026-08-26 decayed off and no run could ever bring them back. A
+# stamped route renews under `--renew-max-usd`; the 2¢ `--max-usd` is only for discovery.
+
+def test_verify_plan_renews_stamped_routes_first_and_discovers_only_with_all():
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from treg import worker
+    now = utcnow_naive()
+    old = SimpleNamespace(endpoint_id="a.old", provider="a", enabled=True, last_verified_at=now - timedelta(days=6))
+    fresh = SimpleNamespace(endpoint_id="a.fresh", provider="a", enabled=True, last_verified_at=now - timedelta(days=1))
+    lapsed = SimpleNamespace(endpoint_id="b.lapsed", provider="b", enabled=False, last_verified_at=now - timedelta(days=9))
+    never = SimpleNamespace(endpoint_id="b.never", provider="b", enabled=False, last_verified_at=None)
+    plan = worker._verify_plan([fresh, never, old, lapsed], all_rows=True, only=None, max_usd=0.02, renew_max_usd=1.0)
+    assert [(r.endpoint_id, cap) for r, cap in plan] == [
+        ("b.lapsed", 1.0), ("a.old", 1.0), ("a.fresh", 1.0), ("b.never", 0.02)]
+    without_all = worker._verify_plan([fresh, never, old, lapsed], all_rows=False, only=None, max_usd=0.02, renew_max_usd=1.0)
+    assert [r.endpoint_id for r, _ in without_all] == ["b.lapsed", "a.old", "a.fresh"]
+    only_b = worker._verify_plan([fresh, never, old, lapsed], all_rows=True, only={"b"}, max_usd=0.02, renew_max_usd=1.0)
+    assert [r.endpoint_id for r, _ in only_b] == ["b.lapsed", "b.never"]
+
+
+async def test_verify_run_visits_pricey_renewals_within_budget_and_skips_pricey_discovery(
+    clients, overflow_on, monkeypatch,
+):
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from treg import worker
+    from treg.domain.capacity import verify as V
+    from treg.domain.catalog import store as catalog_store
+    monkeypatch.setattr(get_settings(), "secret_key", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+    eps = [e for e in catalog_store.load().endpoints if e.get("test_request")][:3]
+    assert len(eps) == 3
+    now = utcnow_naive()
+    specs = [  # (endpoint, price, enabled, stamped)
+        (eps[0], 500_000, True, now - timedelta(days=6)),   # renewal, 50¢: above the 2¢ discovery cap
+        (eps[1], 10_000, True, now - timedelta(days=1)),    # renewal, 1¢
+        (eps[2], 500_000, False, None),                     # discovery, 50¢: held to the 2¢ cap
+    ]
+    async with session_maker() as db:
+        for ep, price, enabled, stamped in specs:
+            db.add(OverflowRoute(endpoint_id=ep["id"], aggregator="orthogonal", provider=ep["provider"],
+                                 method=ep["method"], path=ep["path"], agg_slug=ep["provider"], agg_path=ep["path"],
+                                 agg_price_micro=price, agg_unit="call", ratio=1.0, enabled=enabled,
+                                 last_verified_at=stamped))
+        await db.commit()
+    from treg import oauth_providers
+    monkeypatch.setattr(oauth_providers, "get", lambda *_: None)  # no direct key: spend = relay fee
+    seen = []
+    async def verify(client, route, **kwargs):
+        seen.append(route.endpoint_id)
+        return V.Verification(route.endpoint_id, route.aggregator, None, 200, True,
+                              route.agg_price_micro, utcnow_naive())
+    monkeypatch.setattr(V, "verify_route", verify)
+    args = SimpleNamespace(all=True, only=None, max_usd=0.02, renew_max_usd=1.0, budget_usd=15.0)
+    assert await worker._overflow_verify(args) == 0
+    assert seen == [eps[0]["id"], eps[1]["id"]]   # oldest renewal first; the 50¢ discovery pair is skipped
+    seen.clear()
+    args.budget_usd = 0.30                          # the 50¢ renewal no longer fits; the 1¢ one still does
+    assert await worker._overflow_verify(args) == 0
+    assert seen == [eps[1]["id"]]

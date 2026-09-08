@@ -56,6 +56,13 @@ Catalog entries have no live verification stamps or personal-response fixtures. 
 and mutation routes are not safe unattended probes; public examples must not contain
 customer identities, contact details, webhook secrets, or credentials.
 
+## MillionVerifier (2026-09-08)
+
+MillionVerifier (2026-09-08) follows this key-provider path: query `api` auth, free credits probe
+with an HTTP-200 `error` rejection, two single-host catalog jobs and an existing email-verification
+adapter. The bulk host uses a different auth parameter and is explicitly excluded in the surface
+map. See [catalog](../architecture/catalog.md) for the live credit evidence and pricing limits.
+
 ## The two kinds of provider
 
 - **API-key** (`auth_kind="key"`) — the user pastes a key; self-serve; **the fast path** (research → implement

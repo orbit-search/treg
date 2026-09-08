@@ -40,6 +40,9 @@ Multi-tenant: a token = a (user, org) membership; resources are org-scoped.
 Base URL: {BASE}
 Repo: https://github.com/superdesigndev/treg
 
+Feedback: `treg feedback submit <quality|pricing|friction|other> "message"`, or the MCP `feedback` tool.
+Include call IDs when available and omit private information. Instructions: `{BASE}/feedback.md`.
+
 ## The one mechanic: /call/
 
 Two shapes, one endpoint, one token.
@@ -123,8 +126,11 @@ one back with its ledger entries.
 - **Isolate** the few who need it: `treg org agent-new bot --pin customer=cust_A` mints a token that
   can only ever bill `cust_A`. Tag for counting, token for control.
 
-Embedding the hosted service in a product you sell needs a written agreement with us — talk to us
-first.
+This use case — your product calling the hosted treg.to API, billing your users based on the usage
+data treg returns — is **allowed and encouraged** with no special agreement. treg.to is the API you
+call; the pass-through billing mechanics (tagging, budgets, usage/by-tag) are how it's meant to be
+used. For high-volume or partnership arrangements, contact jason@superdesign.dev — that's optional,
+not a prerequisite.
 
 **Building this?** Point your coding agent at **{BASE}/integrate.md** — the full integration skill:
 the three call methods, tagging from your backend, per-customer limits, and invoicing from the
@@ -214,6 +220,16 @@ apply a filter you sent, the answer says so in `X-Treg-Ignored-Filters` and `_tr
 (post-filter the rows, or say why they are off); send `X-Treg-Route-Strict-Filters: 1` to be refused
 with a 422 (nothing charged) instead of getting the looser answer. `catalog_get` on the routed id
 shows the ranked plan and prices before you spend.
+A found contact is not a confirmed one: an email or phone find is the provider's best match, and
+only `output.verified: true` means it checked the mailbox. Otherwise the answer carries
+`_treg.advice` naming the verify step (`treg.people.email.verify`, a fraction of a cent) — run it
+before outreach, and never re-send the same find: every hit bills, repeats included.
+Verify before you send, every address, every time — including rows from a company or domain
+search (`treg.people.search`, `hunter.companies.emails`): those are directory listings, and a
+row's email is unconfirmed unless that row's own verification field says so. `invalid` is dead,
+`accept_all` is risky. Never send to an address the provider did not return: an empty domain
+search means `info@` is a guess, not a result. (Live 2026-09-08: 73 of one team's 79 bounces were
+unverified rows and guesses that one $0.006 verify call each would have caught.)
 Call a specific provider's endpoint when you need a particular one.
 
 <!--/routed-->
@@ -243,7 +259,24 @@ and where the result is (a path in the terminal response, or one more catalog ca
 Money notes for agents:
 - The price is visible before you call (`treg catalog get`, or `estimated_cost_usd` in
   `GET {BASE}/catalog/endpoints/<id>/access`). No confirmation ritual — costs are fractions
-  of a cent, so just call as normal.
+  of a cent, so just call as normal. Read the catalog `cost` block, not only the headline:
+  `type: per_result` with `unit: row` is priced per returned row and the `~$/call` figure assumes
+  a 20-row page (your `limit` sets the real count); `unit: target|domain|keyword` is priced per
+  thing you ask about — one target is one unit whatever the page size, and a body listing ten
+  domains reserves ten. `per_call` is flat.
+- **What you were actually charged is the response header `X-Treg-Cost-Micro`** (integer
+  micro-USD; `cost_usd` in the MCP `call` result), never anything in the provider's body. Store
+  `X-Treg-Call-Id` with it — support can look a call up by that id.
+- **Hard ceiling before you spend:** send `X-Treg-Route-Max-Cost: <usd>` on a `/call/` request and
+  treg refuses with **402** `error: route_max_cost` (nothing charged) when the reserve would exceed
+  it. There is no default on direct calls; the header is the only cap. On `treg.<capability>`
+  routed calls it also bounds the whole waterfall (default $1 there).
+- A failed call (HTTP 4xx/5xx from the provider) is relayed unchanged and charged nothing; the
+  CLI prints one stderr line with the status, whose answer it is, and the call id — and on a metered
+  success, `treg: charged $<usd> · call id <id>` (stdout is always the exact body). Nothing is
+  served from cache on `/call/`; the only stored answer you can get back is an idempotency replay
+  (`X-Treg-Idempotent-Replay: true`). Empty results are the provider's own semantics — treg does
+  not normalise "no data" vs "no coverage" vs "unsupported target".
 - Out of balance → HTTP **402** with a machine-actionable body: `balance_micro`,
   `estimated_cost_micro`, `topup_url`. Recovery: `treg balance` (ledger), top up in the
   dashboard (Team → Billing), or connect the org's own key for that provider - own keys
@@ -364,15 +397,17 @@ treg is also an **MCP server** at `{BASE}/mcp/`, two ways to authenticate it:
   Code, Cursor — can instead connect with a link + consent screen. Choose **OAuth** when the client
   asks; the token is issued to the team you pick.
 
-Five tools, the same ones for every client:
+A small tool set, the same for every client:
 
     catalog_search   find endpoints by what you want to DO, with prices
     catalog_get      one endpoint in full: params, cost, reliability, siblings
     call             call a catalog endpoint by id, or one of your team's own tools
     balance          the team's prepaid balance
     my_tools         what your team registered that you can call without the key
+    catalog_request  request a missing capability
+    feedback         share a problem or suggestion (omit private information)
 
-All five need a credential, and the challenge comes EARLY: every id-bearing JSON-RPC request,
+All need a credential, and the challenge comes EARLY: every id-bearing JSON-RPC request,
 `initialize` included, is answered with **401** and a `WWW-Authenticate` header naming
 `{BASE}/.well-known/oauth-protected-resource`. That header is how a client discovers where to
 authorize, and challenging the first request is what makes it run OAuth before the session proceeds

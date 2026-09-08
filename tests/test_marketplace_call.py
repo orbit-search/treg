@@ -30,8 +30,9 @@ from treg.application.call import settle as call_settle
 from treg.application.call import service as call_service
 from treg.application.call.types import ResolutionFailed, UpstreamResponse
 from treg.config import get_settings
+from sqlalchemy import select
 from treg.infra.db import session_maker
-from treg.models import Org
+from treg.models import LedgerEntry, Org
 
 EP = "tikhub.tiktok.video.comments"          # GET /api/v1/tiktok/web/fetch_post_comment, aweme_id required
 EP_PATH = "/api/v1/tiktok/web/fetch_post_comment"
@@ -352,6 +353,28 @@ async def test_empty_balance_is_a_402_an_agent_can_act_on(clients: AsyncClient, 
     assert "treg topup --auto on" in d["message"]
 
 
+async def test_caller_max_cost_header_refuses_a_direct_call_before_the_reserve(clients: AsyncClient, platform_on):
+    """`X-Treg-Route-Max-Cost` on a plain /call/: a hard ceiling the caller sets, enforced before any
+    money moves. Below the price → 402 `route_max_cost` naming both figures, balance untouched; at or
+    above it → the call proceeds and is charged as usual; garbage → 400. No default: a direct call
+    without the header is uncapped (unlike the routed path's $1)."""
+    hdr = "X-Treg-Route-Max-Cost"
+    r = await clients.get(f"/call/{EP}?aweme_id=7", headers={hdr: "0.0005"})
+    assert r.status_code == 402, r.text
+    d = r.json()["detail"]
+    assert d["error"] == "route_max_cost" and d["endpoint_id"] == EP
+    assert d["max_cost_micro"] == 500 and d["estimated_cost_micro"] == EP_MICRO
+    assert "nothing was charged" in d["message"]
+    assert await _balance(clients) == 1_000_000
+    r = await clients.get(f"/call/{EP}?aweme_id=7", headers={hdr: "not-money"})
+    assert r.status_code == 400, r.text
+    assert await _balance(clients) == 1_000_000
+    r = await clients.get(f"/call/{EP}?aweme_id=7", headers={hdr: "0.001"})
+    assert r.status_code == 200, r.text
+    assert r.headers["X-Treg-Cost-Micro"] == str(EP_MICRO)
+    assert await _balance(clients) == 1_000_000 - EP_MICRO
+
+
 async def test_a_balance_refusal_is_a_treg_refused_event_not_a_vendor_402(
     clients: AsyncClient, platform_on, posthog_events,
 ):
@@ -489,16 +512,31 @@ async def test_network_error_releases_the_hold(clients: AsyncClient, platform_on
     assert [e["kind"] for e in await _entries(clients)][:2] == ["release", "reserve"]
 
 
-async def test_per_success_4xx_releases_but_per_call_4xx_settles(clients: AsyncClient, platform_on, monkeypatch):
-    """Whether a rejected request costs money is the endpoint's own billing rule (cost.type), not ours:
-    under `per_success` the provider produced nothing, under `per_call` it charged for the attempt."""
+async def test_a_4xx_bills_only_what_the_provider_reports(clients: AsyncClient, platform_on, monkeypatch):
+    """A rejected request is billed on the provider's word, never on the estimate. `per_success`
+    releases whatever the body says (nothing was produced). `per_call` MAY bill a caller-input
+    rejection — but only when the vendor's own charge field says it took something: a 400 with no
+    charge in the body releases the hold (Fiber's "body/identifier Required" and "profile not
+    found" billed twenty $0.04 calls to one team on 2026-09-06 under the old settle-at-the-estimate
+    rule), while scrapecreators reporting `credits_charged: 1` on the same status settles at that."""
     monkeypatch.setattr(call_service, "relay", _fake_relay(400, b'{"error":"bad aweme_id"}'))
     before = await _balance(clients)
     assert (await clients.get(f"/call/{EP}?aweme_id=nope")).status_code == 400
     assert await _balance(clients) == before, "per_success: a rejected request is not billable"
 
+    r = await clients.get(f"/call/{EP_CALL}?group_id=1")
+    assert r.status_code == 400
+    assert r.headers.get("X-Treg-Cost-Micro") == "0"
+    assert await _balance(clients) == before, "per_call, no charge reported: the hold is released"
+    assert [e["kind"] for e in await _entries(clients)][:2] == ["release", "reserve"]
+    async with session_maker() as db:
+        rel = (await db.execute(select(LedgerEntry).where(LedgerEntry.kind == "release")
+                                .order_by(LedgerEntry.created_at.desc()))).scalars().first()
+    assert rel.meta.get("reason") == "rejected_unbilled_400"
+
+    monkeypatch.setattr(call_service, "relay", _fake_relay(400, b'{"error":"bad group","credits_charged":1}'))
     assert (await clients.get(f"/call/{EP_CALL}?group_id=1")).status_code == 400
-    assert await _balance(clients) == before - EP_CALL_MICRO, "per_call: the attempt is billable"
+    assert await _balance(clients) == before - EP_CALL_MICRO, "per_call, charge reported: the caller pays that"
 
 
 async def test_dataforseo_settles_at_the_cost_it_reports(clients: AsyncClient, platform_on, monkeypatch):
@@ -640,6 +678,16 @@ def test_observed_cost_counts_resources_for_billed_oauth_reads():
     assert call_settle._observed_cost_micro(x, b"not json") is None, "unreadable body settles at the estimate"
     write = _mk("x", tier="tool", billed_oauth=True, cost_type="per_call", unit_micro=0)
     assert call_settle._observed_cost_micro(write, b'{"data": {"id": "1"}}') is None, "per_call settles at the estimate"
+
+    # fiber-ai reports `chargeInfo.creditsCharged` on every envelope at $0.02/credit (fx.yaml):
+    # a 2-credit profile fetch, a free identity resolve, and — the case that matters — an error
+    # body with no `chargeInfo`, which settles as unreported so a per_call 400/404 releases.
+    # A poll's "charged-for-async-process" repeats its job's charge and is NOT honoured.
+    fiber = _mk("fiber-ai")
+    assert call_settle._observed_cost_micro(fiber, b'{"output": {}, "chargeInfo": {"method": "charged-now", "creditsCharged": 2}}') == 40_000
+    assert call_settle._observed_cost_micro(fiber, b'{"output": {}, "chargeInfo": {"method": "charged-now", "creditsCharged": 0}}') == 0
+    assert call_settle._observed_cost_micro(fiber, b'{"message": "body/identifier Required", "statusCode": 400}') is None
+    assert call_settle._observed_cost_micro(fiber, b'{"chargeInfo": {"method": "charged-for-async-process", "creditsCharged": 5}}') is None
 
     # leadmagic reports `credits_consumed` too — including 0 on a 2xx miss (observed at verify
     # time) and fractions (email verify = 0.25 credits). $0.025/credit (fx.yaml).
@@ -902,6 +950,42 @@ def test_platform_estimate_normalizes_per_result_pricing():
     assert call_resolution._platform_estimate_micro({"type": "per_call", "usd": None}, {}) == 0
     # rounds UP — a sub-micro fraction must never round to free
     assert call_resolution._platform_estimate_micro({"type": "per_call", "usd": 0.0000005}, {}) == 1
+
+
+def test_platform_estimate_counts_input_entities_not_a_page():
+    """A price per TARGET / DOMAIN / KEYWORD is per thing asked about, never per returned row: with
+    no limit param the 20-row page default billed a one-target SE Ranking summary 20x ($0.358 for a
+    $0.0179 call) and a one-domain Serpstat overview likewise (behavehealth, 2026-09-04). The
+    request names the count — repeated or comma-separated query values, a body array (top level or
+    a JSON-RPC `params`), else exactly one — and `call` is always one."""
+    est = call_resolution._platform_estimate_micro
+    per_target = {"type": "per_result", "unit": "target", "usd": 0.0179}
+    assert est(per_target, {}) == 17_900                                       # catalog display: one call
+    assert est(per_target, {"target": "bestnotes.com", "mode": "domain"}) == 17_900
+    assert est(per_target, {"target": "a.com,b.com,c.com"}) == 3 * 17_900
+    # a real QueryValues-shaped object with repeated keys
+    class Q:
+        def __init__(self, items): self._i = items
+        def get(self, k, d=None): return next((v for kk, v in self._i if kk == k), d)
+        def multi_items(self): return list(self._i)
+    assert est(per_target, Q([("target", "a.com"), ("target", "b.com")])) == 2 * 17_900
+    assert est(per_target, Q([("targets[]", "a.com"), ("targets[]", "b.com")])) == 2 * 17_900
+    # serpstat JSON-RPC: the domains live under params
+    per_domain = {"type": "per_result", "unit": "domain", "usd": 0.0025}
+    body = b'{"id":"1","method":"SerpstatDomainProcedure.getDomainsInfo","params":{"domains":["a.com","b.com"],"se":"g_us"}}'
+    assert est(per_domain, {}, body) == 5_000
+    assert est(per_domain, {}, b'{"params":{"domains":["only.com"],"se":"g_us"}}') == 2_500
+    # seranking keywords export: a 5,000-keyword body is 5,000 keywords, not a 100-row cap
+    per_kw = {"type": "per_result", "unit": "keyword", "usd": 0.00179}
+    kw_body = ('{"keywords":' + str([f"k{i}" for i in range(5000)]).replace("'", '"') + '}').encode()
+    assert est(per_kw, {"source": "us"}, kw_body) == 5000 * 1_790
+    # a limit param on an entity-priced route is NOT a row count
+    assert est(per_target, {"target": "a.com", "limit": "50"}) == 17_900
+    # `call` is the flat case whatever the request carries
+    assert est({"type": "per_result", "unit": "call", "usd": 0.002}, {}, b'{"domain":"x.com","roles":["ceo","cto"]}') == 2_000
+    # row-priced routes keep the page semantics
+    assert est({"type": "per_result", "unit": "row", "usd": 0.0001}, {}) == 0.0001 * call_resolution._PLATFORM_PAGE_DEFAULT * 1_000_000
+    assert est({"type": "quota_rows", "unit": "quota_row", "usd": 0.006667}, {}, b'{"target":"x.com","limit":1}') == 6_667
 
 
 def test_brightdata_platform_key_injects_as_bearer(platform_on):
@@ -1352,7 +1436,8 @@ def test_the_billability_truth_table():
         (401, "per_call", False), (402, "per_call", False), (403, "per_call", False),
         (405, "per_call", False), (407, "per_call", False), (408, "per_call", False),
         (429, "per_call", False), (429, "per_success", False), (429, "per_result", False),
-        # the caller's own input: billed under per_call only
+        # the caller's own input: MAY bill under per_call only — and then only at the charge the
+        # provider reports (`test_a_4xx_bills_only_what_the_provider_reports`)
         (400, "per_call", True), (404, "per_call", True), (422, "per_call", True),
         (400, "per_success", False), (400, "per_result", False),
         (503, "per_call", False), (503, "per_success", False),
@@ -1773,3 +1858,53 @@ async def test_concurrent_settles_never_lose_a_block_draw(clients: AsyncClient):
     # 8 settles × margin(10,000µ$) each must ALL be drawn from the blocks — none lost.
     from treg.domain.money import with_margin
     assert drawn == 8 * with_margin(10_000)
+
+
+@pytest.mark.parametrize(('query', 'count', 'page_size', 'credits'), [
+    ('', 0, 10, 0), ('', 10, 10, 1), ('&limit=1', 1, 1, 1),
+    ('&limit=10', 6, 10, 1), ('&limit=20', 6, 20, 2),
+    ('&limit=50', 50, 50, 5), ('&limit=20&page=1000', 0, 20, 0),
+])
+async def test_tomba_domain_search_settles_returned_emails(
+    clients: AsyncClient, platform_on, monkeypatch, query, count, page_size, credits,
+):
+    """Bill non-empty pages by page size; empty pages are free regardless of total matches."""
+    monkeypatch.setenv('TREG_PLATFORM_KEY_TOMBA', 'SYNTHETIC-TOMBA-KEY')
+    monkeypatch.setenv('TREG_PLATFORM_PROVIDERS', 'tomba')
+    get_settings.cache_clear()
+    body = json.dumps({'data': {
+        'domain': 'company.example',
+        'emails': [{'email': f'person{i}@company.example'} for i in range(count)],
+    }, 'meta': {'total': 100, 'pageSize': page_size}}).encode()
+    monkeypatch.setattr(call_service, 'relay', _fake_relay(200, body))
+    before = await _balance(clients)
+    response = await clients.get(f'/call/tomba.companies.emails.list?domain=company.example{query}')
+    assert response.status_code == 200
+    assert response.content == body
+    assert await _balance(clients) == before - credits * 8_900
+    telemetry = await _telemetry(clients)
+    assert telemetry['cost_estimated_micro'] == max(1, (page_size + 9) // 10) * 8_900
+    assert telemetry['cost_observed_micro'] == credits * 8_900
+    assert telemetry['cost_charged_micro'] == credits * 8_900
+
+
+@pytest.mark.parametrize('body', [
+    b'{}', b'{"data": {}}', b'{"data": {"emails": null}}',
+    b'{"data": {"emails": {}}}', b'{"data": null}', b'not json',
+])
+def test_tomba_domain_search_unknown_results_keep_estimate(body):
+    mk = _mk('tomba', endpoint_id='tomba.companies.emails.list', cost_type='per_result')
+    assert call_settle._observed_cost_micro(mk, body) is None
+
+
+def test_tomba_domain_search_count_does_not_apply_to_other_endpoints():
+    mk = _mk('tomba', endpoint_id='tomba.people.email.verify', cost_type='per_call')
+    assert call_settle._observed_cost_micro(mk, b'{"data": {"emails": []}}') is None
+
+
+@pytest.mark.parametrize('page_size', [None, 0, -1, True, "20", 1.5])
+def test_tomba_unknown_page_size_does_not_guess_from_email_count(page_size):
+    mk = _mk('tomba', endpoint_id='tomba.companies.emails.list', unit_micro=8_900)
+    body = json.dumps({'data': {'emails': [{'email': 'person@company.example'}]},
+                       'meta': {'pageSize': page_size}}).encode()
+    assert call_settle._observed_cost_micro(mk, body) is None

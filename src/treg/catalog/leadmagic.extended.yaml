@@ -118,7 +118,7 @@ endpoints:
     method: POST
     path: /v1/people/personal-email-finder
     name: "Find a personal email from a profile URL"
-    summary: "Locates personal email addresses associated with a professional profile URL, serving as a fallback when work email is unavailable or undeliverable"
+    summary: "Locates personal email addresses associated with a professional profile URL, serving as a fallback when work email is unavailable or undeliverable. ACCURACY WARNING: a 'found' answer is unverified and can belong to someone else entirely — live 2026-09-06, 3 of 5 hits on one team's batch were addresses whose local part did not match the person's name (e.g. a Dennis returned rajasingh…@gmail.com). Verify with people.email.verify before outreach, and do not re-call for the same profile_url: every hit bills 2 credits, including repeats."
     input:
       bodyType: json
       body:

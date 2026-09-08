@@ -4,7 +4,7 @@
 Five shop windows, four bootstraps, one source:
 
 - **codex**  -> `plugin/skills/treg/SKILL.md` — ships an MCP connector, so its bootstrap points at
-  the five tools and tells the reader NOT to reach for a terminal.
+  the MCP tools and tells the reader NOT to reach for a terminal.
 - **claude** -> `skills/treg/SKILL.md` — skills-only by design (nothing about it waits on a
   directory review), so its bootstrap says the opposite: there are no tools, install the CLI. It
   also gets a `version:` stamped into its frontmatter, which is what ClawHub requires and Claude
@@ -36,7 +36,7 @@ Three transformations, each for a reason the served file does not have:
 
 2. A short section is prepended, and it is the ONLY thing that differs between the two variants —
    because they land in opposite worlds. Codex arrives with a connector, so its bootstrap maps the
-   page onto the five tools and tells the reader not to reach for a terminal. Claude Code arrives
+   page onto the MCP tools and tells the reader not to reach for a terminal. Claude Code arrives
    with neither the CLI nor the tools, so its bootstrap walks the setup that produces both:
    `install.sh` -> `treg login` -> `treg mcp install`, in that order (step 3 exits without writing
    if it runs before there is a token). Without either, a first run is an agent dutifully invoking
@@ -196,7 +196,7 @@ DSH_BOOTSTRAP = """
 
 This bundle ships two things: the page you are reading, and a treg MCP connector that stays
 **disabled until `TREG_TOKEN` is in dsh's environment** — a connector registered without a token is
-five tools that 401 on every call. So the first move depends on which one you got.
+MCP tools that return 401 on every call. So the first move depends on which one you got.
 
 **If you can see `mcp__treg__catalog_search`, `mcp__treg__catalog_get`, `mcp__treg__call`,
 `mcp__treg__balance` and `mcp__treg__my_tools`** — the token was there at boot and there is nothing

@@ -346,6 +346,7 @@ def _deny_view(r: DenyRule) -> dict:
 
 _SIGNUP_HTTP_ERRORS = {
     "machine_identity": (403, "this address cannot be used to sign in"),
+    "blocked_domain": (403, "this address cannot be used to sign in"),  # same words: leaks no list
     "unsafe_webhook": (422, "webhook_url must be a public http(s) URL"),
     "email_exists": (409, "email already registered"),
     "sandbox_user": (403, (
@@ -499,6 +500,8 @@ async def accept_invite(body: AcceptIn, db: AsyncSession = Depends(get_session))
     org = await db.get(Org, invite.org_id)
     if org is not None and org.suspended:  # don't let anyone join a platform-locked org
         raise HTTPException(status_code=403, detail="org suspended")
+    if signup_use_cases.blocked_email(email, "invite_code"):  # creates a User directly: guards itself
+        raise HTTPException(status_code=403, detail="this address cannot be used to sign in")
     user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if user is not None and user.suspended:  # a banned user must not accrue new memberships
         raise HTTPException(status_code=403, detail="account suspended")
@@ -709,6 +712,11 @@ async def set_member_cap(
     )).scalar_one_or_none()
     if membership is None:
         raise HTTPException(status_code=404, detail="not a member of this org")
+    if body.daily_call_cap >= 0 and membership.daily_call_cap < 0:
+        # Unlimited members are not counted on the call path; give the counter today's journal so a
+        # cap set mid-day starts from what they already used, not from zero.
+        user = await db.get(User, user_id)
+        await usage_policy.seed_counter(db, membership, user.email if user else "")
     membership.daily_call_cap = body.daily_call_cap
     await db.commit()
     return {"user_id": user_id, "org_id": org_id, "daily_call_cap": body.daily_call_cap}

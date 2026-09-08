@@ -203,11 +203,19 @@ from datetime import datetime, timedelta, timezone
 _log = logging.getLogger("treg.archive")
 _pending: set[asyncio.Task] = set()
 _MAX_PENDING = 512
+# Memory bound: each pending task holds its body bytes in a closure. 512 tasks × 8 MB = 4 GB in the
+# worst case — the 2026-09-07 OOM. This cap sheds recordings when total pending body bytes exceeds
+# the threshold, BEFORE the task count would shed them. 256 MB is generous for a 4 GB container and
+# still allows ~128 concurrent recordings of typical 2 MB bodies.
+_MAX_PENDING_BYTES = 256 * 1024 * 1024
+_pending_bytes = 0
 # At most this many recordings TOUCH THE DATABASE at once (audit's discipline, and its exact
 # loop-bound pattern). Without it a traffic burst put up to 512 concurrent short sessions in
 # front of the API's 15-slot pool — SToneX's pool-pressure report, 2026-09-03. Queued recordings
-# wait INSIDE their task; the caller's response left long ago either way.
-_MAX_CONCURRENT_WRITES = 4
+# wait INSIDE their task; the caller's response left long ago either way. Two, not four: every
+# slot here is paid twice (two uvicorn workers) and again at every deploy against the database's
+# 103-connection ceiling, and a recording is one INSERT of a body that is already in memory.
+_MAX_CONCURRENT_WRITES = 2
 
 _sem: asyncio.Semaphore | None = None
 _sem_loop = None
@@ -285,21 +293,34 @@ def record(
     bytes (`/calls/{id}/result`). Computed here rather than in `_store` so they are computed
     ONCE (the store reuses them) and are true whether or not the write lands: a shed recording
     still names the answer the caller received."""
+    global _pending_bytes
     kh = cache_key(method, endpoint_id, url, caller_body, headers)
     ch = content_hash(body)
-    if len(_pending) >= _MAX_PENDING:  # shed load; the stream self-heals on the next call
+    body_len = len(body)
+    # Shed on EITHER count OR bytes — whichever bound bites first. The bytes bound prevents OOM
+    # when a few large bodies queue while the semaphore is full; the count bound is the legacy
+    # backstop for many small bodies (archive_max_body_bytes is 2 MB, so 512 × 2 MB = 1 GB).
+    if len(_pending) >= _MAX_PENDING or _pending_bytes + body_len > _MAX_PENDING_BYTES:
         return kh, ch
+    _pending_bytes += body_len
     task = asyncio.create_task(asyncio.wait_for(_store(
         method=method, endpoint_id=endpoint_id, provider=provider, url=url,
         caller_body=caller_body, headers=headers, status_code=status_code,
         media_type=media_type, body=body, origin=origin, key_hash=kh, body_hash=ch),
         timeout=_STORE_TIMEOUT_S))
     _pending.add(task)
-    # NOT redundant with drain()'s own removal: on a running server drain() never fires, and this
-    # callback is the only exit from `_pending` — without it the set fills to _MAX_PENDING and
-    # record() sheds every recording from then on.
-    task.add_done_callback(_pending.discard)
+    # Release bytes AND task when done. NOT redundant with drain()'s own removal: on a running
+    # server drain() never fires, and this callback is the only exit from `_pending` — without it
+    # the set fills to _MAX_PENDING and record() sheds every recording from then on.
+    task.add_done_callback(lambda t: _task_done(t, body_len))
     return kh, ch
+
+
+def _task_done(task: asyncio.Task, body_len: int) -> None:
+    """Release the task and its body bytes from the pending budget."""
+    global _pending_bytes
+    _pending.discard(task)
+    _pending_bytes -= body_len
 
 
 async def store_terminal_response(

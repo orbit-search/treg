@@ -34,6 +34,12 @@ Tier 4 has explicit platform-key slots for MiniMax, OpenRouter and Replicate. Th
 receive them as environment secrets, and the worker constructs the same platform bindings as the call
 path. Key values are never copied into task records, logs or archive evidence.
 
+`MILLIONVERIFIER` is a pasted-key Enrichment provider. Both own keys and platform bindings inject
+`api` into the query at `https://api.millionverifier.com`. Its free `/api/v3/credits` probe returns
+HTTP 200 with `error: apikey_not_found` for a garbage key; `token_reject_field="error"` rejects
+that body while allowing valid zero-credit accounts. `platform_key_millionverifier` reads
+`TREG_PLATFORM_KEY_MILLIONVERIFIER`; platform access also requires the existing allow-list.
+
 ## Instagram grant methods (2026-09-01)
 
 Instagram is one provider with two explicit protocol profiles. The default `instagram-login`
@@ -147,8 +153,12 @@ The Meta pair carries three tiers — read / post / **manage** (comments + DMs o
 visitor content, metadata/webhooks, Messenger, Page video, leads_retrieval + its required
 pages_manage_ads rider, and catalog_management on Facebook Pages) — sized for the 2026-08 App Review
 bundle; Instagram manage includes both `instagram_manage_messages` and its Page-side
-`pages_messaging` rider. `default_capability` is the broadest tier by design, so a plain Connect asks
-for manage.
+`pages_messaging` rider. `default_capability` remains the broadest tier by design.
+`TREG_OAUTH_REVIEW_PENDING` is the one operational source for incomplete provider reviews. Generic
+registry metadata maps each key to its fallback, conditional warning, effective new-connect choices,
+and default method. With both Instagram keys pending, plain Connect uses Page `page-tools`; reviewers
+and app roles can still select `page-messages` or direct Instagram Login explicitly. Removing a key
+changes the API, CLI, agent, and dashboard experience together after restart.
 Meta initially returns a long-lived **user** token, but Instagram Graph operations—especially the
 Messaging API—must act through the Facebook Page linked to the selected professional account. The
 Instagram provider therefore declares a resource-token lookup. On account selection,

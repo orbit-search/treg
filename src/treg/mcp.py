@@ -2,10 +2,10 @@
 
 A coding agent reaches treg through the CLI, and the skill tells it which commands to run. An agent
 inside ChatGPT or a Codex plugin has no CLI, and telling it to install one is where the visitor
-leaves. This module is the other door: six tools over MCP, so an agent can search the catalog, read
+leaves. This module is the other door: a small tool set over MCP, so an agent can search the catalog, read
 a price and make the call without anything being installed first.
 
-**Six tools, not 2,600.** The catalog stays *data* — one tool searches it, one reads an entry, one
+**The catalog is data.** One tool searches it, one reads an entry, and one
 calls an endpoint. Exposing every endpoint as its own MCP tool would flood the model's context with
 2,600 schemas and make the catalog unusable, which is the opposite of the point.
 
@@ -42,6 +42,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, TypedDict
 from urllib.parse import parse_qsl, urlsplit
+from uuid import uuid4
 
 import httpx
 from mcp.server import MCPServer
@@ -51,9 +52,10 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.shared.exceptions import MCPError
 from mcp.types import METHOD_NOT_FOUND, ToolAnnotations
 
-from . import audit
+from . import analytics, audit, mcp_feedback
 from .domain.catalog import store as catalog_store
 from .config import PUBLIC_HOST_ALIASES, get_settings
+from .feedback_contract import FeedbackCategory, FEEDBACK_DESCRIPTION
 from .domain.catalog.stats import EndpointObservationReader
 
 # Every tool must declare what it can DO, and the review process checks these against real behaviour.
@@ -115,8 +117,8 @@ class _StaticSurfaceCapabilities:
     """Do not advertise or serve change subscriptions for treg's fixed MCP surface.
 
     MCP SDK 2.0 currently installs subscriptions/listen unconditionally, then derives every
-    listChanged/resource-subscribe capability from that handler. treg never changes its six-tool
-    surface or publishes prompt/resource/tool events; weekly catalog changes are tool DATA, not a
+    listChanged/resource-subscribe capability from that handler. treg never changes its tool
+    surface at runtime or publishes prompt/resource/tool events; weekly catalog changes are tool DATA, not a
     tools/list change. Use the SDK's public middleware seam until it exposes a constructor switch —
     never reach into its private handler registry.
     """
@@ -215,6 +217,13 @@ class RequestOut(TypedDict, total=False):
     detail: str | None
 
 
+class FeedbackOut(TypedDict, total=False):
+    feedback_id: int | None
+    status: str | None
+    error: str | None
+    detail: Any
+
+
 class CatalogGetOut(TypedDict, total=False):
     endpoint: dict[str, Any] | None        # the full catalog entry: params, cost, observed reliability
     provider: dict[str, Any] | None
@@ -229,6 +238,7 @@ class CatalogGetOut(TypedDict, total=False):
 
 
 class CallOut(TypedDict, total=False):
+    call_id: str | None
     status: int | None              # the UPSTREAM status, relayed
     endpoint_id: str | None
     replayed: bool | None           # answered from an earlier call with the same idempotency_key
@@ -673,6 +683,34 @@ async def catalog_request(capability: str, ctx: Context, note: str = "") -> Requ
     )
 
 
+@mcp.tool(
+    description=FEEDBACK_DESCRIPTION,
+    annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False,
+                                idempotent_hint=False),
+    structured_output=True,
+)
+async def feedback(
+    category: FeedbackCategory, message: str, ctx: Context,
+    call_ids: list[str] | None = None, endpoint_id: str | None = None,
+) -> FeedbackOut:
+    return await _feedback_impl(category, message, ctx, call_ids, endpoint_id, surface=_TEAM_SURFACE)
+
+
+async def _feedback_impl(
+    category: FeedbackCategory, message: str, ctx: Context,
+    call_ids: list[str] | None, endpoint_id: str | None, *, surface: _SurfacePolicy,
+) -> FeedbackOut:
+    token = _bearer(ctx)
+    api_context = (_api(token) if surface is _TEAM_SURFACE
+                   else _api(token, client_name=surface.client_name))
+    async with api_context as client:
+        response = await client.post("/feedback", json={
+            "category": category, "message": message, "call_ids": call_ids or [],
+            "endpoint_id": endpoint_id,
+        })
+    return _body(response)
+
+
 async def _catalog_request_impl(
     capability: str, ctx: Context, note: str = "", *, surface: _SurfacePolicy
 ) -> RequestOut:
@@ -926,6 +964,8 @@ async def _call_impl(endpoint_id: str, params: dict | list | None = None,
         r = await client.request(method, f"{route}/{endpoint_id}", **kw)
 
     out: dict[str, Any] = {"status": r.status_code, "endpoint_id": endpoint_id, "body": _body(r)}
+    if call_id := r.headers.get("X-Treg-Call-Id"):
+        out["call_id"] = call_id
     if r.headers.get("X-Treg-Idempotent-Replay") == "true":
         out["replayed"] = True
         out["hint"] = ("this is the stored answer from the earlier call with the same "
@@ -940,6 +980,13 @@ async def _call_impl(endpoint_id: str, params: dict | list | None = None,
             out["cost_usd"] = round(int(spent) / 1_000_000, 6)
         except ValueError:
             pass
+    if 200 <= r.status_code < 300 and not out.get("hint") and not out.get("replayed"):
+        if mcp_feedback.sampled(out.get("call_id") or uuid4().hex):
+            out["hint"] = mcp_feedback.HINT
+            analytics.capture(analytics.SERVER_DISTINCT_ID, "mcp_feedback_hint_attached", {
+                "call_id": out.get("call_id"), "surface": surface.client_name,
+                f"$feature/{mcp_feedback.FLAG}": True,
+            })
     if r.status_code == 402:
         # States the fact and stops. No link, and `topup_url` is stripped from the relayed body, so
         # nothing on this path points a user at a payment page.
@@ -1186,6 +1233,22 @@ async def directory_balance(ctx: Context) -> BalanceOut:
 async def directory_catalog_request(capability: str, ctx: Context, note: str = "") -> RequestOut:
     return await _catalog_request_impl(
         capability, ctx, note, surface=_DIRECTORY_SURFACE,
+    )
+
+
+@directory_mcp.tool(
+    name="feedback",
+    title="Submit Feedback",
+    description=FEEDBACK_DESCRIPTION,
+    annotations=_DIRECTORY_ADDITIVE.model_copy(update={"title": "Submit Feedback"}),
+    structured_output=True,
+)
+async def directory_feedback(
+    category: FeedbackCategory, message: str, ctx: Context,
+    call_ids: list[str] | None = None, endpoint_id: str | None = None,
+) -> FeedbackOut:
+    return await _feedback_impl(
+        category, message, ctx, call_ids, endpoint_id, surface=_DIRECTORY_SURFACE,
     )
 
 
@@ -1515,8 +1578,9 @@ async def mcp_lifespan(target=None):
     inner = target
     while not hasattr(inner, "router"):      # unwrap NoTransformResponses / RequireAuthForProtectedTools
         inner = inner.app
-    async with inner.router.lifespan_context(inner):
-        yield
+    async with mcp_feedback.lifespan():
+        async with inner.router.lifespan_context(inner):
+            yield
 
 
 @asynccontextmanager

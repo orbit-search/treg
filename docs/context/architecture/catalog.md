@@ -3,7 +3,12 @@ title: Endpoint catalog — what you can DO with a connected key, and which prov
 status: shipped
 sources:
   - src/treg/catalog/contracts.yaml
+  - src/treg/catalog/millionverifier.yaml
+  - src/treg/catalog/examples/millionverifier.people.email.verify.json
+  - src/treg/catalog/examples/millionverifier.account.usage.json
   - src/treg/catalog/adapters.yaml
+  - src/treg/catalog/tomba.yaml
+  - src/treg/catalog/examples/tomba.people.email.verify.json
   - src/treg/catalog/examples/findymail.search.business-profile.json
   - src/treg/domain/catalog/routing/__init__.py
   - src/treg/domain/catalog/routing/contracts.py
@@ -94,6 +99,39 @@ The computed cost view uses a `cost.table` fallback as its scalar validated uppe
 eligibility and compact displays. Runtime charging evaluates the first matching row against request
 values plus catalog defaults and freezes that settlement basis. Terminal usage or the recorded table
 evidence feeds the shared money settlement function; provider variation stays declarative in YAML.
+
+## MillionVerifier email verification (2026-09-08)
+
+`millionverifier.yaml` adds single-email verification and the free own-account credit probe.
+The USD price is documented at $89 / 50,000 prepaid credits ($0.00178 each), with no expiry.
+The initial three live verification requests consumed three credits. Subsequent account-ledger
+evidence shows deductions followed by separate goodwill credits for risky results, including
+six catch-all credits returned after three ten-email bulk format tests (30 deducted, six returned).
+Those bulk tests are evidence only, not catalog support. Immediate balance probes are not a
+per-call meter. The account owner later confirmed $89 for the base 50,000-credit pack.
+The catalog rate excludes initial free credits and variable promotional bonuses; it is not
+the effective cost after bonuses. No receipt was inspected, so `confidence: documented` and
+`source: docs` remain appropriate.
+
+`adapters.yaml` adds `millionverifier.people.email.verify` to the existing
+`treg.people.email.verify` contract beside Hunter, LeadMagic and Tomba. `ok` maps to valid;
+other verdicts remain provider-native status words. Like the peer adapters, a risky or invalid
+verdict is an answer, while error bodies (no `quality`) are misses. `settle._observed_cost_micro`
+separately makes unknown/catch-all results free. The upstream `free` flag means a free email
+service, and `credits` is a delayed balance; neither is per-call usage.
+
+Bulk upload, file info/list/download, stop and delete are excluded: those operations use
+`bulkapi.millionverifier.com` with `key` auth and a multipart file lifecycle, rather than this
+provider's Single API host and `api` auth. The YAML records the complete eight-operation map.
+
+## Tomba email verification (2026-09-08)
+
+Tomba email verification uses `GET /v1/email-verifier?email=…`; its catalog input and routing
+adapter both send `email` in query parameters. A live comparison with the same address and
+credentials returned HTTP 200 with a verification verdict on this documented query route and
+HTTP 422 `params_invalid` on the former `/v1/email-verifier/{email}` path. The response fixture
+captures the returned verdict fields; the mapping remains `data.email.status` / `data.email.score`.
+Historical failure-only samples do not establish coverage for the corrected request shape.
 
 ## Authorization metadata
 
@@ -345,6 +383,11 @@ endpoints:
 ```
 
 ### Async descriptors
+
+`catalog_store._normalize` sets `cache: forbidden` for `image-gen` and `video-gen` endpoints,
+including synchronous generation, task/result utilities and generated extended rows. Their `kind`
+is unchanged. These requests must reach the provider, not replay shared-account task ids or media
+from an identical prompt. Other platforms retain their declared/default cache policy.
 
 An asynchronous submission endpoint may carry an `async:` descriptor. A provider file may put the
 same block at top level as a default for every endpoint in that file; an endpoint block **replaces
@@ -1369,7 +1412,16 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   `{linkedin_url}`), `derive` rules so the two name shapes match the same adapters, a small
   *output* core (`email` required; `confidence`, names, `verified` optional) and `miss` in
   canonical terms. `raw` — the winning provider's body — is always returned and never documented
-  as stable.
+  as stable. `advice_unverified` (email and phone finds, and `people.search`) is one sentence the
+  router attaches as `_treg.advice` to a hit whose `verified` is not true — a found contact is not
+  a confirmed one (Hunter's `accept_all`, LeadMagic's personal finder, every phone provider), and a
+  team that sent to such hits unverified bounced on most of them (2026-09-06). A search contract
+  has no `verified` output, so its advice attaches to every hit: rows are directory listings, and
+  the same team's 79-address bounce list (2026-09-08) was 73 unverified Hunter domain-search rows
+  and agent-guessed `info@` addresses that one verify call each would have caught. The
+  `hunter.companies.emails` catalog summary carries the same warning for direct `/call/` users,
+  whose body is relayed verbatim. A suggestion only: treg never chains the verify call, which
+  would double every hit's price and change what the find bills.
 - **Adapters** — `adapters.yaml`, one per endpoint: `accepts` (identity variants), `in` (contract
   field → `queryParams.x` / `body.x`), `const` (fixed provider params), `out` (core field →
   expression over the body), `miss`. The expression language (`domain/catalog/routing/paths.py`)
@@ -1405,7 +1457,9 @@ to choose (`docs/CAPABILITY-ROUTING-PLAN.md`). Everything else in the catalog st
   reserve, relay, settle, audit row and cancellation compensation are the ordinary ones. Vendor
   4xx (not 402/408/429) = usually the caller's fault, but scrapers answer 400 for their own outages
   (tikhub, live 2026-08-28), so the waterfall goes on ONLY to candidates that bill nothing for a
-  rejected request — per_success, free, the org's own key, or per_call ≤ 1¢ (`CHEAP_RETRY_MICRO`)
+  rejected request — per_success, free, the org's own key, or per_call ≤ 1¢ (`CHEAP_RETRY_MICRO`;
+  since 2026-09-07 a per_call rejection settles only at a charge the vendor itself reports, so this
+  is a bound on the reported-charge risk, not on the estimate — see money.md)
   — never the same provider again, within the error bound; if every one rejects it, the caller
   gets `route_caller_fault` naming each attempt. A 4xx the endpoint's YAML declares as its
   "no result" status (`miss: {status: 404}`, see "`miss` semantics ride on the endpoint") is a

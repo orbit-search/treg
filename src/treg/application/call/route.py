@@ -529,9 +529,16 @@ async def run_routed(parent: CallContext, ep: dict, body_bytes: bytes, get_heade
     # The rows answer a LOOSER question than the caller asked when the winner could not express a
     # filter. It is on the attempt, but no caller reads `tried[]` — say it where the answer is, and
     # on a header, or the agent post-filters nothing and never knows why the geography is wrong.
+    # A found contact is not a confirmed one. When the contract says so and the provider did not
+    # vouch for deliverability (`verified` absent or false — Hunter's `accept_all`, LeadMagic's
+    # personal finder, every phone provider), say it where the agent reads the answer. A
+    # suggestion only: the verify call is the agent's to make.
+    advice = (plan.contract.advice_unverified
+              if plan.contract.advice_unverified and output and output.get("verified") is not True else "")
     body_out = {"output": output or {k: None for k in plan.contract.output}, "raw": doc,
                 "_treg": {"served_by": served, "provider": cand.endpoint["provider"], "tier": cand.tier,
                           **({"merged_from": merged_from} if merged_from else {}),
+                          **({"advice": advice} if advice else {}),
                           "outcome": tried[-1].outcome, "tried": [t.view() for t in tried], "charged_micro": spent,
                           **({"ignored_filters": list(cand.ignored)} if cand.ignored else {}),
                           **({"dropped": plan.dropped} if plan.dropped else {})}}

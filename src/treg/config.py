@@ -31,6 +31,18 @@ def platform_setting_name(provider: str) -> str:
     return "platform_key_" + (provider or "").lower().replace("-", "_")
 
 
+@lru_cache
+def _blocked_email_domains(raw: str) -> frozenset[str]:
+    """Parse `TREG_BLOCKED_EMAIL_DOMAINS` once per distinct value, not per request: split on commas,
+    trim, drop a leading `@` or `.` (operators paste both spellings), lowercase, drop empties. A
+    dotless entry (`com`) is dropped too: the classifier walks parent domains, so a bare public
+    suffix would refuse every address on earth from one typo in a dashboard field."""
+    return frozenset(
+        d for d in (part.strip().lstrip("@.").rstrip(".").lower() for part in raw.split(","))
+        if "." in d
+    )
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="TREG_", extra="ignore")
 
@@ -154,6 +166,7 @@ class Settings(BaseSettings):
     platform_key_serpapi: str = ""
     platform_key_moz: str = ""          # base64 of "access_id:secret_key" (HTTP Basic)
     platform_key_seranking: str = ""
+    platform_key_millionverifier: str = ""  # raw key; injected as ?api=…
     platform_key_hunter: str = ""
     platform_key_leadmagic: str = ""
     platform_key_lusha: str = ""
@@ -401,6 +414,9 @@ class Settings(BaseSettings):
     # the Facebook Login app credentials above.
     instagram_client_id: str = ""
     instagram_client_secret: str = ""
+    # Comma-separated registry review keys that do not yet have production access. Remove one key
+    # when its review is approved; set an explicit empty value when all reviews are complete.
+    oauth_review_pending: str = "instagram-login,page-messages"
     # Advertising OAuth platforms — unset by default, so these providers list as "not configured"
     # until this deployment registers its own developer app on each network.
     microsoft_ads_client_id: str = ""
@@ -421,6 +437,21 @@ class Settings(BaseSettings):
     # response, which is an unauthenticated account-takeover vector in prod — so it defaults OFF and
     # must be explicitly enabled (TREG_EMAIL_DEV_MODE=true) for local testing without a mail sender.
     email_dev_mode: bool = False
+
+    # The WHOLE email-domain blocklist (TREG_BLOCKED_EMAIL_DOMAINS), comma-separated:
+    # "example-one.io,example-two.net". There is no list in the code; empty (the default) blocks
+    # nothing. A listed domain blocks itself AND every subdomain, case-insensitively, at every
+    # sign-up and sign-in door and at the two doors that create a promo-funded team (POST /users,
+    # POST /orgs). Configuration rather than code because bulk registration moves to a new domain in
+    # minutes, and a defence that needs a deploy to keep up is always behind. Existing accounts on a
+    # listed domain are suspended out of band, so listing one strands nobody legitimate. A blocklist,
+    # deliberately: no allowlist, no table, no admin UI.
+    blocked_email_domains: str = ""
+
+    @property
+    def blocked_email_domain_set(self) -> frozenset[str]:
+        """The normalised `TREG_BLOCKED_EMAIL_DOMAINS` entries; empty = nothing is blocked."""
+        return _blocked_email_domains(self.blocked_email_domains)
 
     # Frictionless local mode: `curl … | sh` brings up a server you are already signed into, with no
     # account, email or password. Only takes effect when `single_user_ok` allows it (see below).
@@ -473,6 +504,13 @@ class Settings(BaseSettings):
         """OAuth providers whose registry-connect calls are metered (comma-separated
         `TREG_OAUTH_BILLED_PROVIDERS`). Empty = the current free behavior."""
         return frozenset(p.strip().lower() for p in self.oauth_billed_providers.split(",") if p.strip())
+
+    @property
+    def oauth_review_pending_set(self) -> frozenset[str]:
+        """Provider-registry review keys awaiting production access."""
+        return frozenset(
+            key.strip().lower() for key in self.oauth_review_pending.split(",") if key.strip()
+        )
 
     @property
     def expose_dev_code(self) -> bool:

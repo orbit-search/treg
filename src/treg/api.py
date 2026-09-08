@@ -50,6 +50,7 @@ from .routers import billing as billing_routes
 from .routers import call as call_routes
 from .routers import catalog as catalog_routes
 from .routers import connections as connection_routes
+from .routers import feedback as feedback_routes
 from .routers import onboard as onboard_routes
 from .routers import orgs as org_routes
 from .routers import referrals as referral_routes
@@ -277,6 +278,7 @@ async def create_tool_request(
             "note": "logged — requests steer which provider gets keyed next"}
 
 
+router.routes.extend(feedback_routes.app.routes)
 router.routes.extend(auth_routes.social_router.routes)
 router.routes.extend(auth_routes.cli_router.routes)         # CLI pairing
 router.routes.extend(auth_routes.session_router.routes)
@@ -636,9 +638,10 @@ async def list_calls(
     # the two wide columns on this table, this endpoint returns up to 500 rows, and a column nobody
     # reads should not cross the wire. Deferring also means adding them to the payload later has to be
     # a deliberate edit in two places, not an accident in one.
+    # Keep owned free polling in diagnostic audit, but out of Activity before applying the limit.
     q = (select(CallRecord)
          .options(defer(CallRecord.error_request), defer(CallRecord.error_response))
-         .where(CallRecord.org_id == caller.org_id))
+         .where(CallRecord.org_id == caller.org_id, CallRecord.kind != "async_poll"))
     if days is not None:
         q = q.where(CallRecord.created_at >= _day_start_utc() - timedelta(days=max(1, min(days, 365)) - 1))
     if before_id is not None:

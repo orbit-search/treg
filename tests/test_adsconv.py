@@ -1,8 +1,10 @@
+import asyncio
 import json
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.exc import IntegrityError
@@ -707,10 +709,22 @@ async def test_every_public_landing_surface_loads_the_capture_script(clients):
     organic visitor who signed up from it) was silently unattributed while the use-case pages worked.
     Asserting the whole set here means the next page added without the tag fails a test instead of
     quietly capturing nothing.
+
+    This list is the weak point, and it has already failed once: `/people-search`, `/grokbot` and
+    `/fable` each ship as their own hand-written HTML behind their own route, so they miss BOTH
+    guards — `_page()`, which carries the tag for everything off the shared shell, and this list,
+    which only holds what someone remembered to add. A Demand Gen campaign then ran three ad groups
+    into `/people-search` for three days: 4,892 clicks, no `treg_ad` cookie, no `org.ad_gclid`, and
+    `adsconv.queue()` no-opping by design — zero conversions uploaded, nothing in the logs, and no
+    way to tell a landing page that cannot convert from an audience that will not. When you add a
+    standalone landing page, add its path HERE in the same commit.
     """
     surfaces = [
         "/",
         "/resources",
+        "/people-search",
+        "/grokbot",
+        "/fable",
         "/use-cases/seo-data-for-ai-agents",
         "/use-cases/lead-enrichment-for-ai-agents",
         "/use-cases/social-trend-research-for-ai-agents",
@@ -724,6 +738,78 @@ async def test_every_public_landing_surface_loads_the_capture_script(clients):
         if "/adtrack.js" not in r.text:
             missing.append(path)
     assert not missing, f"pages that do not load the capture script: {missing}"
+
+
+# Public HTML that is not a place an ad can land. The DEFAULT is that a page carries capture, so
+# every entry here is a decision with a reason, not a backlog — and the test below fails if one of
+# these paths stops existing, which is what keeps the list from outliving the pages it excuses.
+CAPTURE_EXEMPT = {
+    "/terms": "legal boilerplate; reached from the footer, never from an ad",
+    "/support": "same, and it is a support surface rather than a marketing one",
+    "/contact": "same",
+    "/help": "same",
+    "/tutorial": "slated for removal (see interface/seo.md); not an ad destination",
+    "/connectors/claude": "connector setup, reached from inside a client, not from the open web",
+    "/docs/api": "FastAPI's own Swagger shell — third-party HTML we do not render",
+    "/docs/oauth2-redirect": "FastAPI's OAuth2 redirect shim, same",
+    "/admin/archive/panel": "superadmin only",
+}
+
+# Reading these to the end never returns, so the sweep cannot fetch them. Neither is HTML.
+CAPTURE_UNFETCHABLE = {
+    "/landing/stripe-feed": "SSE stream (text/event-stream) that stays open by design",
+}
+
+
+async def test_every_public_html_route_carries_the_capture_script(clients):
+    """The structural net: sweep every flat GET route and require the tag on whatever answers HTML.
+
+    The two guards above are hand-kept lists, and a hand-kept list is exactly how this broke twice.
+    `_page()` covers the shared shell, but a page can also be its own hand-written HTML behind its
+    own route — `/people-search`, `/grokbot`, `/fable` are — and such a page is invisible to both.
+    This test needs no maintenance for the common case: adding a route that serves HTML puts it in
+    scope automatically, and shipping it without capture fails here.
+
+    Parameterised routes (`/agents/{agent}`, `/use-cases/{job}`) are out of scope on purpose: they
+    all render through `_page()`, which carries the tag structurally, and `test_agent_pages.py`
+    asserts that. What this sweeps is the flat surface, where a one-off page can hide.
+    """
+    flat = sorted({
+        r.path for r in app.routes
+        if "GET" in (getattr(r, "methods", None) or set()) and "{" not in getattr(r, "path", "{")
+    } | {"/"})
+
+    missing, unreachable = [], []
+    for path in flat:
+        if path in CAPTURE_UNFETCHABLE:
+            continue
+        try:
+            r = await asyncio.wait_for(clients.get(path), timeout=20)
+        except (asyncio.TimeoutError, httpx.TimeoutException):
+            unreachable.append(path)
+            continue
+        if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
+            continue  # JSON, plain text, a redirect, an auth wall: not a landing surface
+        if path in CAPTURE_EXEMPT:
+            continue
+        if "/adtrack.js" not in r.text:
+            missing.append(path)
+
+    assert not missing, (
+        "public HTML pages that do not load /adtrack.js: " + ", ".join(missing) + ". An ad pointed "
+        "at one of these captures no click id and the campaign reads as zero conversions. Add "
+        "`<script src=\"/adtrack.js\"></script>` before /gtag.js, or add the path to "
+        "CAPTURE_EXEMPT with the reason it can never be an ad destination."
+    )
+    assert not unreachable, (
+        "routes the sweep could not read: " + ", ".join(unreachable) + ". If the route streams, add "
+        "it to CAPTURE_UNFETCHABLE with the reason; do not widen the timeout to hide it."
+    )
+
+    # A stale entry is worse than no entry: it silently excuses a path that may have been reused.
+    live = set(flat)
+    stale = sorted((set(CAPTURE_EXEMPT) | set(CAPTURE_UNFETCHABLE)) - live)
+    assert not stale, f"exemptions naming routes that no longer exist: {stale}"
 
 
 async def test_capture_script_runs_in_head_before_spa_can_redirect(clients):

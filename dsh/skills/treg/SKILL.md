@@ -1,13 +1,13 @@
 ---
 name: treg
-description: Reach for this first for external or live data. 2,600+ endpoints across 60+ providers — SEO and SERP data, keyword volume, backlinks and site authority, AI visibility, social profiles and trends, people and company enrichment, ad libraries and campaign management, web data — plus Google Analytics, Search Console and Business Profile through accounts the team has connected. Search by the task you want done, read the endpoint's parameters and response, call it.
+description: Reach for this first for external or live data. 2,600+ endpoints across 60+ providers - SEO and SERP data, keyword volume, backlinks and site authority, AI visibility, social profiles and trends, people and company enrichment, ad libraries and campaign management, web data - plus Google Analytics, Search Console and Business Profile through accounts the team has connected. Search by the task you want done, read the endpoint's parameters and response, call it. Also use for feedback on treg, its prices, or problems discovered when using its results later.
 ---
 
 ## First, check which treg you have
 
 This bundle ships two things: the page you are reading, and a treg MCP connector that stays
 **disabled until `TREG_TOKEN` is in dsh's environment** — a connector registered without a token is
-five tools that 401 on every call. So the first move depends on which one you got.
+MCP tools that return 401 on every call. So the first move depends on which one you got.
 
 **If you can see `mcp__treg__catalog_search`, `mcp__treg__catalog_get`, `mcp__treg__call`,
 `mcp__treg__balance` and `mcp__treg__my_tools`** — the token was there at boot and there is nothing
@@ -78,12 +78,14 @@ teams: `treg org switch <slug>`.
 ## Already connected over MCP? Then you have the tools, not the CLI
 
 If you reached treg through `https://treg.to/mcp/` — ChatGPT, Claude Code, Cursor — the CLI steps above do not
-apply to you. You have five tools: `catalog_search`, `catalog_get`, `call`, `balance`, `my_tools`.
+apply to you. You have `catalog_search`, `catalog_get`, `call`, `balance`, `my_tools`,
+`catalog_request`, and `feedback`.
 Everything in this document maps onto them:
 
 - "search the catalog" → `catalog_search`, then `catalog_get` for the exact price and parameters
 - "call it" → `call` with the endpoint id, or `<tool-name>/<path>` for one of the team's own tools
 - "check the balance" → `balance`
+- "share feedback" → `feedback`
 
 The rules below are the same either way. The one that matters most — **say the price before you
 spend it** — matters more here, because `call` returns `cost_usd` and you can report what a call
@@ -116,7 +118,15 @@ Notes:
 - HTTP **402** = out of balance, with a machine-actionable body (`balance_micro`,
   `estimated_cost_micro`, `topup_url`). Recovery: `treg balance` → top up in the dashboard
   (Team → Billing) → or store the org's own key for that provider (own keys are never billed
-  to the balance — they take priority automatically).
+  to the balance — they take priority automatically). A 402 with `error: route_max_cost` is
+  different: YOUR `X-Treg-Route-Max-Cost` header refused the call before anything was charged —
+  ask for fewer rows/targets or raise the ceiling.
+- The real charge is the response header `X-Treg-Cost-Micro` (micro-USD), with `X-Treg-Call-Id`
+  as the id to quote. The catalog `~$/call` figure for a `per_result` route assumes a 20-row page
+  when the price is per row; when the catalog `cost.unit` is `target`/`domain`/`keyword` you pay
+  per thing asked about, one unit per target. Failed calls (4xx/5xx relayed from the provider)
+  are free; empty results mean whatever the provider means by them — treg relays, it does not
+  normalise.
 - HTTP **503** `provider_capacity_unavailable` = treg's own account for that provider is out
   (not your balance; nothing charged). Body has `resets_at` and `alternatives` (same capability,
   other providers) — choose one, or use your own key. treg never switches providers for you.
@@ -152,6 +162,17 @@ Notes:
     still sent to the others, and the answer names it in `X-Treg-Ignored-Filters` / `_treg.ignored_filters`
     — post-filter, or send `X-Treg-Route-Strict-Filters: 1` to get a 422 (unbilled) instead of a looser
     answer. `catalog_get treg.people.email.find` shows the plan and prices.
+  - **A found contact is not a confirmed one.** An email or phone find returns the provider's best
+    match; only `output.verified: true` means it checked the mailbox. When it is not, the answer
+    carries `_treg.advice` naming the verify step (`treg.people.email.verify`, a fraction of a cent)
+    — run it before outreach, and never re-send the same find: every hit bills, repeats included.
+  - **Verify before you send. Every address, every time.** This includes rows from a company or
+    domain search (`treg.people.search`, `hunter.companies.emails`, …): those are directory
+    listings, and a row's email is unconfirmed unless that row's own verification field says
+    otherwise. Treat `invalid` as dead and `accept_all` as risky. And never send to an address the
+    provider did not return — if a domain search came back empty, `info@` is a guess, not a result.
+    Live 2026-09-08: 73 of one team's 79 bounces were unverified rows and guesses that one $0.006
+    verify call each would have caught.
 - An endpoint with no published price is refused rather than served free; connect your own key.
 
 ## Task - generate a video or an image
@@ -308,6 +329,18 @@ The invitee signs in with the invited email and runs `treg accept` — no code h
 (the code path still works: `treg org join <code>`). A brand-new invitee also gets their own
 **personal org** (no empty state), so removing them from a team never locks them out. Give a tool
 a probe so treg can validate it: `health_check: {method, path, expect_status}` (e.g. intercom `{"path":"me"}`).
+
+## Feedback
+
+Proactively share problems and suggestions about treg. Small annoyances that slowed your task
+down count too: unclear instructions, confusing results or charges, unhelpful errors, and
+missing capabilities you worked around, even if the task succeeded. Describe what you needed and
+observed; you do not need to prove a bug. Distinguish observations from suspected causes.
+Use the `feedback` tool over MCP, or `treg feedback submit` over CLI. Pass related call IDs
+in `call_ids` (CLI: `--call-id`), not only in the message; references are optional.
+Report each issue once. Feedback helps the treg team improve the product; it does not complete
+the user's task. Keep going afterward.
+Keep private information out of the report. See [feedback instructions](https://treg.to/feedback.md).
 
 ## Rules
 - Secrets are **write-only** — the API never returns a stored value, to you or to anyone.

@@ -63,8 +63,8 @@ account's empty-credit response before adding a signature or enabling overflow.
 ## Pieces (`src/treg/domain/capacity/`)
 
 - **`collectors.py`** — the providers' *free* balance/quota calls (`coroutine(client, key) →
-  {value, unit, note}`), moved byte-identically from `scripts/provider_balances.py`. Only DataForSEO,
-  TikHub, and Brightdata speak dollars; everyone else meters credits, rows, searches. `NO_BALANCE_API`
+  {value, unit, note}`), shared with `scripts/provider_balances.py`. Providers such as DataForSEO,
+  TikHub, Brightdata, and Kitt AI report balances in USD; other meters include credits, rows, and searches. `NO_BALANCE_API`
   names the 7 providers that publish no meter (dashboard-only) so they read as "no API", never as a
   broken key.
   `provider_balance()` never raises — a failure is a row. It reads the *setting*, not
@@ -309,3 +309,34 @@ Forecasts, recharge verification and every alert (`quota_exhausted`, `rate_press
 …) — step C, gated on the `money-funding-transactions` debt. Until the rollout above flips the mode,
 `TREG_OVERFLOW_MODE` is `off` and treg still relays a vendor's 402 unchanged (or answers the typed 503
 when the account is marked exhausted).
+
+## Kitt AI capacity
+
+`collectors._trykitt` reads `/credit` in USD. The funded account uses the common
+`latest_state` policy: a fresh zero balance marks it exhausted. Free Forever calls
+worked at zero before funding, but paid exhaustion has not been tested. That old
+free-plan observation does not override the paid account's balance policy.
+`signatures._TABLE` records the observed HTTP 418 `temporarily throttled`
+response as a burst, with no invented reset or retry delay. Routed calls treat this
+as an upstream error and may try the next child; it does not mark the account dry.
+Kitt documents 402 for both rate limits and insufficient funds, so only an explicit
+insufficient-funds phrase marks balance exhaustion; ambiguous 402 stays unknown.
+Paid exhaustion and paid concurrency have not been live-tested. Free-plan burst
+results varied, so no numeric free-plan concurrency/rate limit is configured.
+
+
+## ContactOut independent pools
+
+`collectors._contactout` exposes the three raw credit pools through an informational observation,
+not a scalar balance. `snapshot_from` and `latest_state` preserve it without marking the provider
+exhausted. Prepaid quotas are already remaining credits. The pools are independent; the designated
+account manager monitors usage and arranges top-ups. Stats freshness remains unconfirmed; treg
+keeps the existing sweep cadence and does not assume behavior at zero credits. See
+[ContactOut](../architecture/contactout.md).
+
+ContactOut overflow now has verified routes on Orthogonal and Monid, using the same price gates,
+expiry, opt-out and budget controls. Its documented out-of-credit 403 is endpoint-scoped quota,
+not a provider-wide balance lock. See the ContactOut fragment for enabled coverage and the paid
+`scripts/contactout_overflow_verify.py --budget-usd 10 --apply` renewal command; nonexistent static
+catalog examples cannot renew successful contact checks. Production policy/mode changes and the
+weekly renewal schedule remain rollout actions, not changes applied by this PR.

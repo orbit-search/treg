@@ -5,7 +5,7 @@ source:
   curated: '2026-09-04'
 limits: Scoped API key and token-bucket limits apply. Honor Retry-After on 429; see
   https://docs.orbitsearch.com/concepts/rate-limits.
-pricing_url: https://docs.orbitsearch.com/concepts/search
+pricing_url: https://developer.orbitsearch.com/
 proposed_capabilities:
   people.search.status: Get search status
   people.enrich.batch: Batch enrich profiles
@@ -284,12 +284,14 @@ endpoints:
       terminal partial success: retain ready results and inspect failures. Do not
       repeat POST to poll. Native treg --await is not configured.'
   cost:
-    type: free
-    value: 0
+    type: per_call
+    value: null
     currency: USD
     unit: call
-    note: Current Orbit v3 Search and Enrich documentation states no credit consumption;
-      checked 2026-09-04. Rate limits and API-key authorization still apply.
+    confidence: unknown
+    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
+      and Orbit applies charges under their account plan. The per-operation credit
+      amount is not established here.
   docs_url: https://docs.orbitsearch.com/
   untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
     personal/account data or change scheduled work. Request schema comes from the
@@ -317,12 +319,14 @@ endpoints:
       terminal partial success: retain ready results and inspect failures. Do not
       repeat POST to poll. Native treg --await is not configured.'
   cost:
-    type: free
-    value: 0
+    type: per_call
+    value: null
     currency: USD
     unit: call
-    note: Current Orbit v3 Search and Enrich documentation states no credit consumption;
-      checked 2026-09-04. Rate limits and API-key authorization still apply.
+    confidence: unknown
+    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
+      and Orbit applies charges under their account plan. The per-operation credit
+      amount is not established here.
   docs_url: https://docs.orbitsearch.com/
   untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
     personal/account data or change scheduled work. Request schema comes from the
@@ -378,12 +382,14 @@ endpoints:
       returned child links.status separately. Do not restart POST to poll. Native
       treg --await is not configured.'
   cost:
-    type: free
-    value: 0
+    type: per_call
+    value: null
     currency: USD
     unit: call
-    note: Current Orbit v3 Search and Enrich documentation states no credit consumption;
-      checked 2026-09-04. Rate limits and API-key authorization still apply.
+    confidence: unknown
+    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
+      and Orbit applies charges under their account plan. The per-operation credit
+      amount is not established here.
   docs_url: https://docs.orbitsearch.com/
   untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
     personal/account data or change scheduled work. Request schema comes from the
@@ -411,12 +417,14 @@ endpoints:
       completed or failed. Batch accepts 1–20 IDs; poll each returned child links.status
       separately. Do not restart POST to poll. Native treg --await is not configured.
   cost:
-    type: free
-    value: 0
+    type: per_call
+    value: null
     currency: USD
     unit: call
-    note: Current Orbit v3 Search and Enrich documentation states no credit consumption;
-      checked 2026-09-04. Rate limits and API-key authorization still apply.
+    confidence: unknown
+    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
+      and Orbit applies charges under their account plan. The per-operation credit
+      amount is not established here.
   docs_url: https://docs.orbitsearch.com/
   untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
     personal/account data or change scheduled work. Request schema comes from the
@@ -467,12 +475,14 @@ endpoints:
       links.status separately. Do not restart POST to poll. Native treg --await is
       not configured.'
   cost:
-    type: free
-    value: 0
+    type: per_call
+    value: null
     currency: USD
     unit: call
-    note: Current Orbit v3 Search and Enrich documentation states no credit consumption;
-      checked 2026-09-04. Rate limits and API-key authorization still apply.
+    confidence: unknown
+    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
+      and Orbit applies charges under their account plan. The per-operation credit
+      amount is not established here.
   docs_url: https://docs.orbitsearch.com/
   untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
     personal/account data or change scheduled work. Request schema comes from the
@@ -501,12 +511,14 @@ endpoints:
       links.status separately. Do not restart POST to poll. Native treg --await is
       not configured.
   cost:
-    type: free
-    value: 0
+    type: per_call
+    value: null
     currency: USD
     unit: call
-    note: Current Orbit v3 Search and Enrich documentation states no credit consumption;
-      checked 2026-09-04. Rate limits and API-key authorization still apply.
+    confidence: unknown
+    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
+      and Orbit applies charges under their account plan. The per-operation credit
+      amount is not established here.
   docs_url: https://docs.orbitsearch.com/
   untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
     personal/account data or change scheduled work. Request schema comes from the
@@ -911,7 +923,7 @@ endpoints:
       without waiting for a real event. The body is your most recent event of this
       type when you have one and the documented example payload otherwise; either
       way the envelope carries `"test": true` and an `evt_test_` event ID. Test deliveries
-      are free, are never retried, and are not recorded in your delivery history.
+      are never retried and are not recorded in your delivery history.
       Requires the `webhooks:write` scope and is rate limited more tightly than other
       routes. Optional. Defaults to the first event type the endpoint subscribes to;
       must be one of its subscribed types.'

@@ -51,6 +51,14 @@ _TABLE: list[tuple[str, int, str, str]] = [
     # Documented 2026-09-08: discovery's allowance is distinct from the shared credit pool.
     # https://docs.influencers.club/guides/error-handling — ordinary burst 429s have Retry-After.
     ("influencersclub", 429, r"Discovery API credit limit reached", "quota"),
+    ("trykitt", 418, r"temporarily throttled", "burst"),
+    ("trykitt", 402, r"insufficient (?:credits?|funds|balance)|out of credits", "balance"),
+    # This API uses 402 for both funds and rate limits. The first matching row wins.
+    ("trykitt", 402, r"", "unknown"),
+    # ContactOut documents this 403 separately from "No access to endpoint".
+    # Independent pools: lock only the failed endpoint, never the entire provider.
+    # https://api.contactout.com/#errors (checked 2026-09-08).
+    ("contactout", 403, r"you're out of credits", "quota"),
     ("*", 402, r"", "balance"),
 ]
 
@@ -144,7 +152,8 @@ def classify(provider: str, status: int, headers=None, body: bytes | str = b"",
         if pattern and not re.search(pattern, text, re.IGNORECASE):
             continue
         resets = _quota_reset(provider, kind, headers, now)
-        return Signal(kind, resets, None, detail=text[:120])
+        return Signal(kind, resets, _retry_after(headers, now) if kind == "burst" else None,
+                      detail=text[:120])
     if status == 429:
         wait = _retry_after(headers, now)
         if wait is not None and wait <= BURST_MAX_RETRY_AFTER_S:

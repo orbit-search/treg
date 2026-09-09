@@ -45,12 +45,11 @@ The key probe is an empty POST to `/v3/search`: a live valid key returned HTTP 4
 403. The provider accepts only the expected 400 envelope, rejecting other HTTP statuses.
 This starts no search work. Search permission is required to connect.
 
-The current public Search and Enrich docs state no credit consumption. Other operation
-prices remain unknown, not zero. No shared platform credential or settlement rate is
-configured by this contribution. Poll each returned search/request ID, and each batch
-child separately; preserve partial success and do not use POST as a polling operation.
-Native `--await` is not configured: Treg's async descriptor requires per-success billing,
-while these current v3 operations are documented as free. No artificial fee is added.
+Orbit uses usage-based credits. Customers connect their own Orbit API key, and Orbit
+applies charges under their account plan.
+
+Poll each returned search/request ID, and each batch child separately; preserve partial
+success and do not use POST as a polling operation. Native `--await` is not configured.
 
 Catalog entries have no live verification stamps or personal-response fixtures. Account
 and mutation routes are not safe unattended probes; public examples must not contain
@@ -199,3 +198,8 @@ Instagram direct Login plus optional Facebook Page tools is the reference implem
 - `test_default_capability_is_the_broadest` — OAuth: `write ⊇ read` (or one capability).
 - `test_every_requested_scope_has_a_label` — a `SCOPE_LABELS` entry per OAuth scope (key providers have none).
 - `test_key_providers` — the offerable + connect-flow coverage for `auth_kind="key"`.
+
+ContactOut uses the same pasted-key path with `token` header auth and a free `/v1/stats` probe.
+Its garbage-token rejection and valid connection were verified live; its independent pools stay
+informational, with monitoring and top-ups managed by the designated account manager.
+See [ContactOut](../architecture/contactout.md).

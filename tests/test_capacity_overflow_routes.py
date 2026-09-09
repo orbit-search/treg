@@ -96,8 +96,8 @@ def test_match_catalogs_by_exact_host_method_path_with_prefix_folding():
 
 async def test_sync_reproduces_the_verified_set_and_never_enables_a_bad_ratio(monkeypatch):
     await reset_db()
-    # Preserve the August baseline; September's Influencers Club verification is tested separately.
-    seed = [{**x, "verified_at": None} if x["provider"] == "influencersclub" else x
+    # Preserve the August baseline; September provider verifications are tested separately.
+    seed = [{**x, "verified_at": None} if x["provider"] in ("influencersclub", "contactout") else x
             for x in R.load_seed()]
     verified = {(x["endpoint_id"], x["aggregator"]) for x in seed if x["verified_at"]}
     assert len(verified) == 145, "the 2026-08-26 verified set (131 ROUTE + 11 tomba + 2 phone + hunter domain-search)"
@@ -202,7 +202,7 @@ def test_every_recorded_phrase_arms_the_tripwire():
     phrase in `_TABLE` (the 429 rows carry period words, not capacity phrases) is in CAPACITY_PHRASES."""
     import re as _re
     for provider, status, pattern, kind in S._TABLE:
-        if not pattern or status == 429 or _re.escape(pattern) != pattern:
+        if kind not in ("balance", "quota") or not pattern or status == 429 or _re.escape(pattern) != pattern:
             continue  # empty (the bare 402 row), a period word, or a regex we cannot use as a body
         sig = S.classify("someone-else", 400, None, pattern.encode())
         assert sig is not None and sig.kind == "unrecorded", f"{provider}'s phrase {pattern!r} does not arm the tripwire"
@@ -513,3 +513,12 @@ def test_worker_cli_parses_overflow_commands(monkeypatch):
     assert seen["renew_max_usd"] == worker.RENEW_MAX_USD and seen["budget_usd"] == worker.VERIFY_BUDGET_USD
     assert worker.main(["overflow", "verify", "--renew-max-usd", "0.7", "--budget-usd", "3"]) == 0
     assert seen["renew_max_usd"] == 0.7 and seen["budget_usd"] == 3.0
+
+
+def test_trykitt_throttle_is_not_exhaustion():
+    s=S.classify('trykitt',418,body=json.dumps({'message': 'temporarily throttled', 'response_code': 418}))
+    assert s.kind=='burst' and not S.is_exhausting(s)
+    assert S.classify('trykitt',402,body='rate limit').kind=='unknown'
+    assert S.classify('trykitt',402,body='insufficient funds').kind=='balance'
+
+    assert S.classify("trykitt", 418, headers={"retry-after": "5"}, body="temporarily throttled").retry_after_s == 5

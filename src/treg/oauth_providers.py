@@ -1151,33 +1151,31 @@ ORBIT = OAuthProvider(
     display_name="Orbit",
     auth_kind="key",
     token_label="API key",
-    token_placeholder="your Orbit API key",
-    setup_url="https://developer.orbitsearch.com/",
+    token_placeholder="sk_orb_…",
+    setup_url="https://developer.orbitsearch.com/dashboard/keys",
     setup_action_label="Get your Orbit API key",
     setup_steps=(
         "Sign in to the Orbit developer dashboard and open API Keys.",
-        "Create a scoped key. Search needs search:read; profile reads need profile:read.",
-        "Enable watchers:write or webhooks:write only if you need those operations.",
+        "Create a scoped key: search:read for Search and Enrich, profile:read to read profiles.",
+        "Add watchers:write or webhooks:write only if you will manage watchers or webhooks.",
     ),
-    setup_note="Orbit uses usage-based credits. Customers connect their own Orbit API key, "
-               "and Orbit applies charges under their account plan. "
-               "The connection check validates an empty search request without starting work. "
-               "Poll returned resource IDs; do not repeat POST requests to check progress.",
+    setup_note="Usage-based credits on your own Orbit account (1 credit = $0.01; rate card at "
+               "https://docs.orbitsearch.com/concepts/credits). Search and Enrich are asynchronous: "
+               "use `treg call --await`, or poll the returned search_id / request_id — never re-POST.",
     auth_uri="", token_uri="",
     scopes={},
     client_id_setting="", client_secret_setting="",
     category="Enrichment",
-    summary="The most in-depth, source-backed context about a person for deep personalization and research.",
+    summary="Search for people and read source-backed, in-depth profiles: work history, education, socials, contact fields and life events.",
     base_url="https://api.orbitsearch.com",
     docs_url="https://docs.orbitsearch.com/",
-    probe_path="/v3/search",
-    probe_method="POST",
-    probe_json={},
-    # Live: an authorized empty search is 400/status=failed; invalid keys are 403.
-    # Accept only that validation response, never a 404, rate limit, or gateway error.
-    probe_reject_statuses=tuple(code for code in range(100, 600) if code != 400),
+    # Free, unmetered, scope-less self read (any valid key). Live 2026-09-10: a bogus `sk_orb_…` key
+    # gets 403 {"status":"failure","error":{"code":"invalid_api_key",…}}; a valid one 200 with
+    # {"status":"success","payload":{…}}. Reading the body field keeps a 200 error envelope from
+    # ever counting as a verified key.
+    probe_path="/v3/credits/usage",
     token_ok_field="status",
-    token_ok_value="failed",
+    token_ok_value="success",
 )
 
 APOLLO = OAuthProvider(

@@ -1,11 +1,18 @@
+# Orbit — people search and source-backed profile enrichment (v3 REST). Curated by the vendor
+# (Nicholas Dominici, Orbit) from the public OpenAPI on 2026-09-10; prices from the public
+# rate card GET https://api.orbitsearch.com/v2/developer/pricing (1 credit = $0.01, fx.yaml).
+# Search and single-profile Enrich are asynchronous: the submit response is a snapshot and the
+# `async` descriptors let `treg call --await` poll the status utilities. Batch Enrich has no
+# parent poll route (each child is polled on its own request_id), so it carries no descriptor.
 provider: orbit
 source:
   docs: https://docs.orbitsearch.com/
   openapi: https://docs.orbitsearch.com/openapi.json
-  curated: '2026-09-04'
-limits: Scoped API key and token-bucket limits apply. Honor Retry-After on 429; see
-  https://docs.orbitsearch.com/concepts/rate-limits.
-pricing_url: https://developer.orbitsearch.com/
+  curated: '2026-09-10'
+limits: >-
+  Scoped API keys; token-bucket limits per key (search starts 5 rps / burst 25, status polls 25 rps /
+  burst 150, profile reads 50 rps / burst 250). Honor Retry-After on 429; see https://docs.orbitsearch.com/concepts/rate-limits.
+pricing_url: https://docs.orbitsearch.com/concepts/credits
 proposed_capabilities:
   people.search.status: Get search status
   people.enrich.batch: Batch enrich profiles
@@ -27,11 +34,28 @@ endpoints:
   platform: people
   domain: search
   scope: any_account
-  kind: data
+  kind: action
   method: POST
   path: /v3/search
   name: Start a people search
   summary: Start a people search
+  async:
+    id_from: search_id
+    poll:
+      endpoint: orbit.people.search.status
+      param:
+        in: pathParams
+        name: search_id
+    status:
+      path: status
+      success:
+      - completed
+      - completed_with_errors
+      failure:
+      - failed
+    result:
+      path: results
+    interval: 5
   input:
     bodyType: json
     body:
@@ -44,9 +68,9 @@ endpoints:
         type: string
         minLength: 1
         required: false
-        note: A plain-English description of the people you want. When intent is also
-          present, Orbit derives a base intent from this query before applying the
-          caller-provided structured fields.
+        note: >-
+          A plain-English description of the people you want. When intent is also present, Orbit derives
+          a base intent from this query before applying the caller-provided structured fields.
       intent:
         type: object
         minProperties: 1
@@ -232,18 +256,19 @@ endpoints:
         type: boolean
         default: false
         required: false
-        note: Continue beyond known matches to find additional people. Address, email,
-          and phone signals can each resolve to multiple associated people.
+        note: >-
+          Continue beyond known matches to find additional people. Address, email, and phone signals can
+          each resolve to multiple associated people.
       candidate_discovery_limit:
         type: integer
         minimum: 1
         maximum: 50
         default: 10
         required: false
-        note: Maximum number of Candidate Discovery results. Valid only with candidate_discovery
-          set to true. A lower value reduces downstream profile-generation fanout,
-          although source discovery and clustering can still dominate initial discovery
-          time.
+        note: >-
+          Maximum number of Candidate Discovery results. Valid only with candidate_discovery set to true.
+          A lower value reduces downstream profile-generation fanout, although source discovery and clustering
+          can still dominate initial discovery time.
         min: 1
         max: 50
       profile_depth:
@@ -258,44 +283,51 @@ endpoints:
         type: boolean
         default: true
         required: false
-        note: Embed profile objects in results. This changes the response shape, not
-          the enrichment work.
+        note: Embed profile objects in results. This changes the response shape, not the enrichment work.
       limit:
         type: integer
         minimum: 1
         maximum: 100
         default: 20
         required: false
-        note: The maximum number of matches returned from the existing Orbit index.
-          Candidate Discovery results append outside this limit, and profile upgrades
-          update selected results in place.
+        note: >-
+          The maximum number of matches returned from the existing Orbit index. Candidate Discovery results
+          append outside this limit, and profile upgrades update selected results in place.
         min: 1
         max: 100
-    note: 'Find people, optionally discover additional candidates, and build every
-      selected result to the requested profile depth. Requires the `search:read` scope.
-      Requests that include profiles also require `profile:read`. Idempotency-Key:
-      A client-generated key for a safe retry. If the body omits `request_id`, Orbit
-      can use this value as the request ID. Provide `query`, `intent`, at least one
-      identity signal, or a supported combination. When query and intent are both
-      present, Orbit derives a base intent from query and overlays the caller-provided
-      intent. Arrays, scalar values, and null replace derived values; nested objects
-      merge field by field. Reuse request_id for safe POST retries. Poll orbit.people.search.status
-      with the returned search_id while status is running. completed_with_errors is
-      terminal partial success: retain ready results and inspect failures. Do not
-      repeat POST to poll. Native treg --await is not configured.'
+    note: >-
+      Find people, optionally discover additional candidates, and build every selected result to the requested
+      profile depth. Requires `search:read`; `include_profile: true` also requires `profile:read`. Provide
+      `query`, `intent`, at least one identity signal, or a supported combination; when `query` and `intent`
+      are both present Orbit derives a base intent from the query and overlays the structured fields (arrays,
+      scalars and null replace; nested objects merge). Send an `Idempotency-Key` header or `request_id`
+      and reuse it only for retries of the same logical request. The response is a snapshot: while `status`
+      is `running` poll `orbit.people.search.status` with `search_id` (treg `--await` does this); `completed_with_errors`
+      is terminal partial success — keep the ready results and inspect the failures.
+  test_request:
+    body:
+      query: Sam Altman
+      limit: 1
+      include_profile: false
   cost:
-    type: per_call
-    value: null
-    currency: USD
-    unit: call
-    confidence: unknown
-    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
-      and Orbit applies charges under their account plan. The per-operation credit
-      amount is not established here.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    currency: credit
+    source: rate_card_api
+    source_url: https://api.orbitsearch.com/v2/developer/pricing
+    checked: '2026-09-10'
+    confidence: documented
+    type: per_success
+    value: 1
+    per: 10
+    unit: result
+    note: >-
+      Rate card `index_search`: 1 credit per block of 10 cached profiles returned, incomplete blocks rounded
+      up, so `limit: 1` costs the same 1 credit as `limit: 10`; a search that returns no cached profiles
+      is free. Extras on top of the block price: `candidate_discovery: true` bills each discovered profile
+      at 1 (existing profile), 5 (newly generated partial) or 10 (newly generated full), bounded by `candidate_discovery_limit`;
+      `profile_depth: full` bills 10 per cached result that has to be upgraded. Polling the search is
+      free and never re-bills profiles already returned. The test_request is the cheapest paid shape (1
+      credit).
+  docs_url: https://docs.orbitsearch.com/api/search/search
 - id: orbit.people.search.status
   capability: people.search.status
   platform: people
@@ -306,31 +338,32 @@ endpoints:
   path: /v3/search/{search_id}
   name: Get search status
   summary: Get search status
+  resource_ownership:
+    requires:
+      kind: poll:orbit.people.search.status
+      param: search_id
+  async: false
   input:
     pathParams:
       search_id:
         type: string
         minLength: 1
         required: true
-    note: 'Return the latest search snapshot. Poll while the status is `running`.
-      Requires the `search:read` scope. Searches that include profiles also require
-      `profile:read`. Reuse request_id for safe POST retries. Poll orbit.people.search.status
-      with the returned search_id while status is running. completed_with_errors is
-      terminal partial success: retain ready results and inspect failures. Do not
-      repeat POST to poll. Native treg --await is not configured.'
+    note: >-
+      Return the latest snapshot of a search. Poll while `status` is `running`; `completed` and `completed_with_errors`
+      are terminal. Results are append-only and each result carries its own `status`, so ready profiles
+      can be used before the search finishes. Requires `search:read` (and `profile:read` when the search
+      embeds profiles).
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    confidence: unknown
-    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
-      and Orbit applies charges under their account plan. The per-operation credit
-      amount is not established here.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Status polls are free; the accepted search operation already covers its results.
+  docs_url: https://docs.orbitsearch.com/api/search/search-status
+  untestable: >-
+    needs a search_id that the calling account created on the submit route (orbit.people.search); ids
+    are account-scoped, so no fixed replay target exists. --await polls it automatically.
 - id: orbit.people.enrich.batch
   capability: people.enrich.batch
   platform: people
@@ -357,8 +390,9 @@ endpoints:
           type: string
           minLength: 1
         required: true
-        note: Provide between 1 and 20 Orbit profile IDs or slugs. Duplicate entries
-          within this list are normalized before work starts.
+        note: >-
+          Provide between 1 and 20 Orbit profile IDs or slugs. Duplicate entries within this list are
+          normalized before work starts.
       operation:
         type: string
         enum:
@@ -366,34 +400,59 @@ endpoints:
         - full
         - regenerate
         required: true
-        note: Use `partial` for a useful profile, `full` for the deepest available
-          profile, or `regenerate` to rebuild a fresh full profile.
+        note: >-
+          Use `partial` for a useful profile, `full` for the deepest available profile, or `regenerate`
+          to rebuild a fresh full profile.
       include_profile:
         type: boolean
         default: true
         required: false
         note: Embed available profiles in child results.
-    note: 'Apply one enrichment operation to between 1 and 20 known Orbit profile
-      IDs. Requires the `search:read` scope. Requests that include profiles also require
-      `profile:read`. Idempotency-Key: A client-generated key for a safe retry. If
-      the body omits `request_id`, Orbit can use this value as the request ID. Read
-      uses GET and starts no work. POST can build or regenerate a profile. Poll orbit.people.enrich.status
-      with request_id until completed or failed. Batch accepts 1–20 IDs; poll each
-      returned child links.status separately. Do not restart POST to poll. Native
-      treg --await is not configured.'
+    note: >-
+      Apply one enrichment operation (`partial`, `full`, or `regenerate`) to 1–20 known Orbit profile
+      ids or slugs; duplicates are normalised before work starts. Requires `search:read` (and `profile:read`
+      to embed profiles). The response lists one child per profile with its own `request_id`, `status`
+      and `links.status`; poll each child with `orbit.people.enrich.status` until `completed` or `failed`
+      — the batch itself has no parent poll route, so treg `--await` does not apply here. `completed_with_errors`
+      is terminal partial success. Send an `Idempotency-Key` header or `request_id` and reuse it only
+      for retries.
+  test_request:
+    body:
+      profile_ids:
+      - a23ff3b7-b6cc-4ac6-8d4f-0c909cd956f5
+      operation: partial
+      include_profile: false
   cost:
-    type: per_call
-    value: null
-    currency: USD
-    unit: call
-    confidence: unknown
-    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
-      and Orbit applies charges under their account plan. The per-operation credit
-      amount is not established here.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    currency: credit
+    source: rate_card_api
+    source_url: https://api.orbitsearch.com/v2/developer/pricing
+    checked: '2026-09-10'
+    confidence: documented
+    type: per_result
+    table:
+    - when:
+        body.operation: partial
+      value: 5
+    - when:
+        body.operation: full
+      value: 10
+    - when:
+        body.operation: regenerate
+      value: 10
+    fallback:
+      value: 10
+      note: >-
+        The full and regenerate operations bill 10 credits per profile; a batch holds at most 20 profile
+        ids, so one request is bounded at 200 credits.
+    unit: record
+    settle: table
+    note: >-
+      Rate card `partial_profile` 5 / `full_profile` 10, billed per profile in `profile_ids` (1–20). A
+      profile that already meets the requested depth is not billed again; `regenerate` always rebuilds
+      and bills the full rate. The test_request is a DELIBERATE NO-OP: it asks for `partial` on a profile
+      that is already at level 3, so it charges 0 — the 5/10 hit prices are the rate-card figures, to
+      be observed once on a real target in the PR ledger.
+  docs_url: https://docs.orbitsearch.com/api/enrich/batch-enrich
 - id: orbit.people.profile.read
   capability: people.profile.read
   platform: people
@@ -410,25 +469,26 @@ endpoints:
         type: string
         minLength: 1
         required: true
-    note: Read the current public profile for an Orbit profile ID, known alias ID,
-      or public profile slug. This request does not start or upgrade enrichment. Requires
-      the `profile:read` scope. Read uses GET and starts no work. POST can build or
-      regenerate a profile. Poll orbit.people.enrich.status with request_id until
-      completed or failed. Batch accepts 1–20 IDs; poll each returned child links.status
-      separately. Do not restart POST to poll. Native treg --await is not configured.
+    note: >-
+      Read the current public profile for an Orbit profile id, alias id, or public profile slug: identity,
+      headline, location, experience, education, accomplishments, socials, contact fields where public,
+      sources, and confidence data. This starts no enrichment work. Requires `profile:read`.
+  test_request:
+    pathParams:
+      profile_id: a23ff3b7-b6cc-4ac6-8d4f-0c909cd956f5
   cost:
-    type: per_call
-    value: null
-    currency: USD
-    unit: call
-    confidence: unknown
-    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
-      and Orbit applies charges under their account plan. The per-operation credit
-      amount is not established here.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    currency: credit
+    source: rate_card_api
+    source_url: https://api.orbitsearch.com/v2/developer/pricing
+    checked: '2026-09-10'
+    confidence: documented
+    type: per_success
+    value: 1
+    unit: record
+    note: >-
+      Rate card `profile_read`: 1 credit per explicit read of a full profile. Search result summaries
+      are not reads; reading never triggers generation. `developer_profile_not_found` is not billed.
+  docs_url: https://docs.orbitsearch.com/api/enrich/read-profile
 - id: orbit.people.enrich
   capability: people.enrich
   platform: people
@@ -439,6 +499,22 @@ endpoints:
   path: /v3/enrich/{profile_id}
   name: Enrich a profile
   summary: Enrich a profile
+  async:
+    id_from: request_id
+    poll:
+      endpoint: orbit.people.enrich.status
+      param:
+        in: pathParams
+        name: request_id
+    status:
+      path: status
+      success:
+      - completed
+      failure:
+      - failed
+    result:
+      path: profile
+    interval: 5
   input:
     pathParams:
       profile_id:
@@ -459,34 +535,54 @@ endpoints:
         - full
         - regenerate
         required: true
-        note: Use `partial` for a useful profile, `full` for the deepest available
-          profile, or `regenerate` to rebuild a fresh full profile.
+        note: >-
+          Use `partial` for a useful profile, `full` for the deepest available profile, or `regenerate`
+          to rebuild a fresh full profile.
       include_profile:
         type: boolean
         default: true
         required: false
         note: Embed the profile when it is available.
-    note: 'Read, upgrade, or regenerate one known Orbit profile. Requires the `search:read`
-      scope. Requests that include the profile also require `profile:read`. Idempotency-Key:
-      A client-generated key for a safe retry. If the body omits `request_id`, Orbit
-      can use this value as the request ID. Read uses GET and starts no work. POST
-      can build or regenerate a profile. Poll orbit.people.enrich.status with request_id
-      until completed or failed. Batch accepts 1–20 IDs; poll each returned child
-      links.status separately. Do not restart POST to poll. Native treg --await is
-      not configured.'
+    note: >-
+      Build, upgrade, or regenerate one known Orbit profile. `partial` gives a useful profile, `full`
+      the deepest available, `regenerate` a fresh full rebuild. Requires `search:read` (and `profile:read`
+      to embed the profile). The response is a snapshot: while `status` is `running` poll `orbit.people.enrich.status`
+      with `request_id` (treg `--await` does this). Send an `Idempotency-Key` header or `request_id` and
+      reuse it only for retries; do not re-POST to poll.
+  test_request:
+    pathParams:
+      profile_id: a23ff3b7-b6cc-4ac6-8d4f-0c909cd956f5
+    body:
+      operation: partial
+      include_profile: false
   cost:
-    type: per_call
-    value: null
-    currency: USD
-    unit: call
-    confidence: unknown
-    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
-      and Orbit applies charges under their account plan. The per-operation credit
-      amount is not established here.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    currency: credit
+    source: rate_card_api
+    source_url: https://api.orbitsearch.com/v2/developer/pricing
+    checked: '2026-09-10'
+    confidence: documented
+    type: per_success
+    table:
+    - when:
+        body.operation: partial
+      value: 5
+    - when:
+        body.operation: full
+      value: 10
+    - when:
+        body.operation: regenerate
+      value: 10
+    fallback:
+      value: 10
+      note: The full and regenerate operations are the most expensive shapes on this route at 10 credits.
+    unit: record
+    settle: table
+    note: >-
+      Rate card `partial_profile` 5 / `full_profile` 10. A profile that already meets the requested depth
+      is not billed again; a full build includes its intermediate partial (never 5 + 10); `regenerate`
+      always rebuilds and bills 10. The test_request is a DELIBERATE NO-OP: `partial` on a profile already
+      at level 3 charges 0 — the hit price is to be observed once on a real target in the PR ledger.
+  docs_url: https://docs.orbitsearch.com/api/enrich/enrich-profile
 - id: orbit.people.enrich.status
   capability: people.enrich.status
   platform: people
@@ -497,32 +593,31 @@ endpoints:
   path: /v3/enrich/requests/{request_id}
   name: Get enrichment status
   summary: Get enrichment status
+  resource_ownership:
+    requires:
+      kind: poll:orbit.people.enrich.status
+      param: request_id
+  async: false
   input:
     pathParams:
       request_id:
         type: string
         minLength: 1
         required: true
-    note: Return the latest snapshot for one profile enrichment request. Poll while
-      the status is `running`. Requires the `search:read` scope. Requests that include
-      the profile also require `profile:read`. Read uses GET and starts no work. POST
-      can build or regenerate a profile. Poll orbit.people.enrich.status with request_id
-      until completed or failed. Batch accepts 1–20 IDs; poll each returned child
-      links.status separately. Do not restart POST to poll. Native treg --await is
-      not configured.
+    note: >-
+      Return the latest snapshot for one enrichment request or one batch child. Poll while `status` is
+      `running`; `completed` and `failed` are terminal. Requires `search:read` (and `profile:read` when
+      the request embeds the profile).
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    confidence: unknown
-    note: Orbit uses usage-based credits. Customers connect their own Orbit API key,
-      and Orbit applies charges under their account plan. The per-operation credit
-      amount is not established here.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Status polls are free; the accepted enrichment operation already covers its result.
+  docs_url: https://docs.orbitsearch.com/api/enrich/enrich-status
+  untestable: >-
+    needs a request_id that the calling account created on the submit route (orbit.people.enrich or a
+    batch child); ids are account-scoped, so no fixed replay target exists. --await polls it automatically.
 - id: orbit.people.watchers.create
   capability: people.watchers.create
   platform: people
@@ -559,30 +654,28 @@ endpoints:
           - existing_sources
           - existing_socials
           - new_sources
-          description: '`existing_sources` watches sources already on the profile
-            for updates; `existing_socials` watches the person''s social activity;
-            `new_sources` looks for new sources about the person.'
+          description: >-
+            `existing_sources` watches sources already on the profile for updates; `existing_socials`
+            watches the person's social activity; `new_sources` looks for new sources about the person.
         required: false
         note: Restrict runs to these phases. Omit or send `null` to run all three.
-    note: Start watching a profile. Orbit checks it on the schedule you choose and
-      adds what it finds to the profile. Each profile has one watcher per organization;
-      creating a watcher for a profile you already watch updates that watcher and
-      turns it back on. Requires the `watchers:write` scope.
+    note: >-
+      Start watching a profile. Orbit checks it on the schedule you choose and adds what it finds to the
+      profile. Each profile has one watcher per organization; creating a watcher for a profile you already
+      watch updates that watcher and turns it back on. Requires the `watchers:write` scope.
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: >-
+      The create call itself is free. Each scheduled run then bills the rate card `watcher_run` (1 credit)
+      plus `watcher_update` (5 credits) when it adds new information; the charge is listed per run on
+      orbit.people.watchers.runs, and a watcher pauses itself when the balance is insufficient.
+  docs_url: https://docs.orbitsearch.com/api/watchers/create
+  untestable: >-
+    creating a watcher schedules recurring, billed refresh runs on the calling account (1 credit per run,
+    +5 when a run finds new information); not a safe unattended replay.
 - id: orbit.people.watchers.list
   capability: people.watchers.list
   platform: people
@@ -595,21 +688,15 @@ endpoints:
   summary: List watchers
   input:
     note: All your watchers. Requires the `watchers:write` scope.
+  test_request:
+    queryParams: {}
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Management reads are free.
+  docs_url: https://docs.orbitsearch.com/api/watchers/list
 - id: orbit.people.watchers.get
   capability: people.watchers.get
   platform: people
@@ -626,23 +713,15 @@ endpoints:
         type: string
         format: uuid
         required: true
-    note: One watcher, with its schedule and run counters. Requires the `watchers:write`
-      scope.
+    note: One watcher, with its schedule and run counters. Requires the `watchers:write` scope.
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Management reads are free.
+  docs_url: https://docs.orbitsearch.com/api/watchers/get
+  untestable: needs a watcher_id owned by the calling account; harvest one from orbit.people.watchers.list.
 - id: orbit.people.watchers.update
   capability: people.watchers.update
   platform: people
@@ -664,8 +743,7 @@ endpoints:
       enabled:
         type: boolean
         required: false
-        note: '`false` pauses the watcher; `true` resumes it and schedules the next
-          run.'
+        note: '`false` pauses the watcher; `true` resumes it and schedules the next run.'
       interval_seconds:
         type: integer
         minimum: 3600
@@ -683,28 +761,24 @@ endpoints:
           - existing_sources
           - existing_socials
           - new_sources
-          description: '`existing_sources` watches sources already on the profile
-            for updates; `existing_socials` watches the person''s social activity;
-            `new_sources` looks for new sources about the person.'
+          description: >-
+            `existing_sources` watches sources already on the profile for updates; `existing_socials`
+            watches the person's social activity; `new_sources` looks for new sources about the person.
         required: false
         note: Send `null` to run all three phases.
-    note: Pause, resume, retime or rescope a watcher. Send the fields you want to
-      change. Requires the `watchers:write` scope. Send the fields you want to change.
+    note: >-
+      Pause, resume, retime or rescope a watcher. Send the fields you want to change. Requires the `watchers:write`
+      scope. Send the fields you want to change.
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: >-
+      The update call is free; resuming a watcher resumes its billed runs (see orbit.people.watchers.create).
+  docs_url: https://docs.orbitsearch.com/api/watchers/update
+  untestable: >-
+    mutates a watcher owned by the calling account (pause, resume, retime); needs a watcher_id from orbit.people.watchers.list.
 - id: orbit.people.watchers.delete
   capability: people.watchers.delete
   platform: people
@@ -721,23 +795,18 @@ endpoints:
         type: string
         format: uuid
         required: true
-    note: Deletes the watcher and its schedule. Pausing keeps the configuration for
-      later; deleting removes it. Requires the `watchers:write` scope.
+    note: >-
+      Deletes the watcher and its schedule. Pausing keeps the configuration for later; deleting removes
+      it. Requires the `watchers:write` scope.
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Deleting is free and stops further billed runs.
+  docs_url: https://docs.orbitsearch.com/api/watchers/delete
+  untestable: >-
+    destructive on the calling account's own watcher; needs a watcher_id from orbit.people.watchers.list.
 - id: orbit.people.watchers.runs
   capability: people.watchers.runs
   platform: people
@@ -763,24 +832,17 @@ endpoints:
         required: false
         min: 1
         max: 200
-    note: 'The watcher''s refresh runs, newest first: outcome, the events each run
-      added with their sources, and what was billed. Requires the `watchers:write`
-      scope.'
+    note: >-
+      The watcher's refresh runs, newest first: outcome, the events each run added with their sources,
+      and what was billed. Requires the `watchers:write` scope.
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Reading run history is free; each row's `charge_amount` shows what that run billed.
+  docs_url: https://docs.orbitsearch.com/api/watchers/runs
+  untestable: needs a watcher_id owned by the calling account; harvest one from orbit.people.watchers.list.
 - id: orbit.people.webhooks.create
   capability: people.webhooks.create
   platform: people
@@ -798,8 +860,9 @@ endpoints:
         type: string
         format: uri
         required: true
-        note: A publicly reachable `https://` URL. Slack incoming-webhook URLs are
-          accepted and receive a formatted message instead of the raw JSON payload.
+        note: >-
+          A publicly reachable `https://` URL. Slack incoming-webhook URLs are accepted and receive a
+          formatted message instead of the raw JSON payload.
       event_types:
         type: array
         items:
@@ -815,23 +878,19 @@ endpoints:
         type: string
         required: false
         note: Free-form label for your own bookkeeping.
-    note: Registers an HTTPS URL to receive signed event deliveries. The response
-      includes the signing `secret` once. Requires the `webhooks:write` scope.
+    note: >-
+      Registers an HTTPS URL to receive signed event deliveries. The response includes the signing `secret`
+      once. Requires the `webhooks:write` scope.
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Webhook management and deliveries are free.
+  docs_url: https://docs.orbitsearch.com/api/webhooks/create
+  untestable: >-
+    registers an HTTPS endpoint on the calling account and returns a signing secret once; not a safe unattended
+    replay.
 - id: orbit.people.webhooks.list
   capability: people.webhooks.list
   platform: people
@@ -843,23 +902,16 @@ endpoints:
   name: List webhook endpoints
   summary: List webhook endpoints
   input:
-    note: Your registered endpoints, with masked signing secrets. Requires the `webhooks:write`
-      scope.
+    note: Your registered endpoints, with masked signing secrets. Requires the `webhooks:write` scope.
+  test_request:
+    queryParams: {}
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Webhook management and deliveries are free.
+  docs_url: https://docs.orbitsearch.com/api/webhooks/list
 - id: orbit.people.webhooks.delete
   capability: people.webhooks.delete
   platform: people
@@ -876,23 +928,18 @@ endpoints:
         type: string
         format: uuid
         required: true
-    note: Deletes the endpoint. Deliveries stop immediately and the signing secret
-      is invalidated. Requires the `webhooks:write` scope.
+    note: >-
+      Deletes the endpoint. Deliveries stop immediately and the signing secret is invalidated. Requires
+      the `webhooks:write` scope.
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Webhook management and deliveries are free.
+  docs_url: https://docs.orbitsearch.com/api/webhooks/delete
+  untestable: >-
+    destructive on the calling account's own endpoint; needs a webhook_id from orbit.people.webhooks.list.
 - id: orbit.people.webhooks.test
   capability: people.webhooks.test
   platform: people
@@ -919,26 +966,20 @@ endpoints:
         - company.alert
         - portfolio.changed
         required: false
-    note: 'Delivers one signed test event to the endpoint so you can verify your handler
-      without waiting for a real event. The body is your most recent event of this
-      type when you have one and the documented example payload otherwise; either
-      way the envelope carries `"test": true` and an `evt_test_` event ID. Test deliveries
-      are never retried and are not recorded in your delivery history.
-      Requires the `webhooks:write` scope and is rate limited more tightly than other
-      routes. Optional. Defaults to the first event type the endpoint subscribes to;
-      must be one of its subscribed types.'
+    note: >-
+      Delivers one signed test event to the endpoint so you can verify your handler without waiting for
+      a real event. The body is your most recent event of this type when you have one and the documented
+      example payload otherwise; either way the envelope carries `"test": true` and an `evt_test_` event
+      ID. Test deliveries are never retried and are not recorded in your delivery history. Requires the
+      `webhooks:write` scope and is rate limited more tightly than other routes. Optional. Defaults to
+      the first event type the endpoint subscribes to; must be one of its subscribed types.
   cost:
-    type: per_call
-    value: null
+    type: free
+    value: 0
     currency: USD
     unit: call
-    source: docs
-    source_url: https://docs.orbitsearch.com/
-    checked: '2026-09-04'
-    confidence: unknown
-    note: No per-operation public price was established for watcher or webhook operations.
-      BYOK only; do not treat unknown pricing as free or enable platform-key billing.
-  docs_url: https://docs.orbitsearch.com/
-  untestable: 'No unattended replay: requires customer-owned resource IDs or can expose
-    personal/account data or change scheduled work. Request schema comes from the
-    public OpenAPI; not claimed live-verified.'
+    note: Test deliveries are free.
+  docs_url: https://docs.orbitsearch.com/api/webhooks/test
+  untestable: >-
+    needs a webhook_id owned by the calling account and a reachable HTTPS receiver; the route is rate
+    limited more tightly than the rest of the API.

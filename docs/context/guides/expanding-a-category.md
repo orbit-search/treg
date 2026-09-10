@@ -33,27 +33,45 @@ pasted-key provider is **`connect_with_token`** (`POST /connections/token`) in
 [auth-secrets](../architecture/auth-secrets.md) + [api](../interface/api.md);
 this fragment is the *process*, not the mechanics reference.
 
-## Orbit (2026-09-04)
+## Orbit (2026-09-10)
 
-Orbit uses customer-owned scoped bearer keys from https://developer.orbitsearch.com/.
-Its 16-operation catalog comes from the current public v3 OpenAPI: search and status,
-profile reads, single/batch enrichment and status, watchers, and webhooks. Profile reads
-are distinct from POST enrichment. Company enrichment is not advertised as a shipped API.
+Orbit (`orbit`) is a customer-key provider: scoped `sk_orb_…` bearer keys from
+https://developer.orbitsearch.com/dashboard/keys. The 16-row catalog is the whole public v3
+OpenAPI (https://docs.orbitsearch.com/openapi.json): Search + status, profile read, single and
+batch Enrich + status, six watcher routes, four webhook routes.
 
-The key probe is an empty POST to `/v3/search`: a live valid key returned HTTP 400 with
-`status: failed` and `developer_deep_search_input_required`; a live invalid key returned
-403. The provider accepts only the expected 400 envelope, rejecting other HTTP statuses.
-This starts no search work. Search permission is required to connect.
+**Probe.** `GET /v3/credits/usage` — free, unmetered, needs no scope, and answers
+`{"status":"success",…}` for any valid key; `token_ok_field: status` / `token_ok_value: success`
+so a 200 error envelope never counts. Live 2026-09-10: a bogus `sk_orb_…` key gets 403
+`{"status":"failure","error":{"code":"invalid_api_key","message":"Invalid, revoked, expired, or
+malformed API key"}}`; a key without the prefix gets 401 `missing_api_key`. The route ships with
+Orbit's centralized-billing release (2020-api #1280); until then it is a 404 and connect fails
+closed. (The earlier probe, an empty `POST /v3/search` expecting 400, was replaced because the
+eligibility rule wants a 2xx for a valid key.)
 
-Orbit uses usage-based credits. Customers connect their own Orbit API key, and Orbit
-applies charges under their account plan.
+**Prices.** Orbit publishes a machine-readable rate card, `GET
+https://api.orbitsearch.com/v2/developer/pricing` (no key), rendered at
+https://docs.orbitsearch.com/concepts/credits. Every paid row is `currency: credit`,
+`source: rate_card_api`, `confidence: documented`; fx.yaml prices a credit at $0.01 (packages
+$10/1,000 … $200/20,000, no volume bonus). Search bills 1 credit per 10 cached results
+(`per: 10`); Candidate Discovery and `profile_depth: full` add per-profile tiers (1 / 5 / 10)
+that the note spells out; profile read 1; Enrich prices out of a `body.operation` table
+(partial 5, full/regenerate 10); status polls, watcher/webhook management are free — watcher
+*runs* bill 1 (+5 on an update) later, on the account's balance. Platform-key slot shipped
+(`platform_key_orbit`, `TREG_PLATFORM_KEY_ORBIT`); the four `any_account` paid rows are
+`platform_eligible`, the own-account management rows are not.
 
-Poll each returned search/request ID, and each batch child separately; preserve partial
-success and do not use POST as a polling operation. Native `--await` is not configured.
+**Async.** Search and single Enrich carry `async` descriptors (`search_id` → `orbit.people.search.status`,
+`request_id` → `orbit.people.enrich.status`; success `completed`/`completed_with_errors`, failure
+`failed`; interval 5 s), so `treg call --await` works. Batch Enrich has no parent poll route — each
+child is polled on its own `request_id` — so it carries none. Status rows are `kind: utility` with
+`resource_ownership.requires` on the `poll:` kind.
 
-Catalog entries have no live verification stamps or personal-response fixtures. Account
-and mutation routes are not safe unattended probes; public examples must not contain
-customer identities, contact details, webhook secrets, or credentials.
+**Test requests.** Six rows replay: Search (`"Sam Altman"`, limit 1, no profiles — the cheapest
+paid shape, 1 credit), profile read, Enrich and batch Enrich (all on one public level-3 profile, so
+the two Enrich replays are deliberate no-ops that charge 0), watcher list and webhook list (free).
+The remaining ten are `untestable` with the reason on the row: account-scoped ids from a submit
+route, or mutations that schedule billed runs / register endpoints.
 
 ## MillionVerifier (2026-09-08)
 

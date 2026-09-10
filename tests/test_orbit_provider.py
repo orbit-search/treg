@@ -141,3 +141,83 @@ async def test_orbit_connect_accepts_only_a_success_envelope_from_the_usage_prob
         orbit = next(tool for tool in tools if tool["name"] == "orbit")
         assert orbit["bindings"][0] == {**orbit["bindings"][0], "name": "Authorization", "format": "Bearer {secret}"}
     assert providers.get("orbit").probe_path == "/v3/credits/usage"
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.now, self.sleeps, self.events = 0.0, [], []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def report(self, message: str) -> None:
+        self.events.append(message)
+
+
+def _resp(status: int, body: dict) -> httpx.Response:
+    return httpx.Response(status, json=body, request=httpx.Request("GET", "https://example.test"))
+
+
+async def test_orbit_search_submission_advertises_its_poll_and_the_status_utility_relays_the_path_param(clients, monkeypatch):
+    """The whole BYOK loop an agent runs: submit → X-Treg-Async → poll the status utility with
+    `search_id` as a query param that treg renders into `/v3/search/{search_id}` upstream."""
+    assert (await clients.post("/secrets", json={"name": "orbit", "value": "orbit-test-placeholder"})).status_code == 200
+    upstream_urls = []
+
+    def upstream(request):
+        upstream_urls.append((request.method, str(request.url)))
+        body = ({"status": "running", "search_id": "srch_123", "results": []} if request.method == "POST"
+                else {"status": "completed", "search_id": "srch_123", "results": [{"profile_id": PROFILE, "status": "ready"}]})
+        return httpx.Response(202 if request.method == "POST" else 200, headers={"Content-Type": "application/json"},
+                              stream=httpx.ByteStream(json.dumps(body).encode()))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        monkeypatch.setattr(app.state, "http", client)
+        submitted = await clients.post("/call/orbit.people.search", json={"query": "Sam Altman", "limit": 1, "include_profile": False})
+        assert submitted.status_code == 202, submitted.text
+        descriptor = json.loads(submitted.headers["X-Treg-Async"])
+        assert descriptor["id_from"] == "search_id"
+        assert descriptor["poll"] == {"endpoint": "orbit.people.search.status", "param": {"in": "pathParams", "name": "search_id"}}
+        polled = await clients.get("/call/orbit.people.search.status?search_id=srch_123")
+    assert polled.status_code == 200, polled.text
+    assert polled.json()["results"][0]["profile_id"] == PROFILE
+    assert upstream_urls == [("POST", "https://api.orbitsearch.com/v3/search"),
+                             ("GET", "https://api.orbitsearch.com/v3/search/srch_123")]
+
+
+def test_treg_await_follows_the_orbit_search_descriptor_to_partial_success():
+    """`treg call orbit.people.search --await`: running → completed_with_errors is terminal SUCCESS
+    (keep the ready results, inspect the failures), never a re-POST, results returned from `results`."""
+    from treg import cli
+    cat = catalog_store.load()
+    descriptor = next(ep for ep in cat.for_provider("orbit") if ep["id"] == "orbit.people.search")["async"]
+    polls = iter([
+        _resp(200, {"status": "running", "results": []}),
+        _resp(200, {"status": "running", "results": [{"profile_id": PROFILE, "status": "ready"}]}),
+        _resp(200, {"status": "completed_with_errors", "results": [{"profile_id": PROFILE, "status": "ready"}],
+                    "candidate_discovery_failure": {"code": "clustering_failed"}}),
+    ])
+    seen = []
+
+    def call_fn(target, params):
+        seen.append((target, params))
+        return next(polls)
+
+    clock = _FakeClock()
+    outcome = cli.await_async_task(descriptor, _resp(202, {"status": "running", "search_id": "srch_9"}), call_fn, clock, 120)
+    assert outcome["code"] == 0, outcome
+    assert outcome["status"] == "completed_with_errors"
+    assert outcome["result"] == [{"profile_id": PROFILE, "status": "ready"}]
+    assert outcome["recovery"] == "treg call orbit.people.search.status -p search_id=srch_9"
+    assert seen == [("orbit.people.search.status", [("search_id", "srch_9")])] * 3
+    assert clock.sleeps == [5.0, 5.0, 5.0]  # the catalog's 5 s interval
+
+    # a failed search is terminal failure, handed back verbatim
+    failed = _resp(200, {"status": "failed", "results": []})
+    outcome = cli.await_async_task(descriptor, _resp(202, {"status": "running", "search_id": "srch_10"}),
+                                   lambda t, p: failed, _FakeClock(), 30)
+    assert outcome["code"] == 2 and outcome["response"] is failed
